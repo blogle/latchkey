@@ -1,0 +1,27 @@
+# Operations
+
+## Health and readiness
+
+- Gateway exposes `/healthz` and `/readyz`.
+- Operator logs startup and watcher state transitions.
+
+## Logging
+
+- JSON structured logs via `tracing`.
+- Include request and resource context where available.
+
+## Metrics
+
+- Gateway exports a placeholder `/metrics` endpoint in bootstrap.
+- Metrics schema and cardinality model should align to `docs/spec.md` before implementation grows.
+
+## Tracing
+
+- OTel hooks are not fully wired in bootstrap.
+- Future work should preserve W3C trace context propagation.
+
+## Runbooks (bootstrap)
+
+- Local checks: `just ci`
+- Local build: `just build`
+- Local deploy: `just deploy-dev`

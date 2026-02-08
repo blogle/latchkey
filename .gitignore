@@ -1,0 +1,10 @@
+/target/
+/result
+/result-*
+/.direnv/
+/.nix-profile
+/.nix-defexpr
+/.envrc.local
+/.rustc_info.json
+/.env
+/.DS_Store

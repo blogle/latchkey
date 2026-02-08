@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+
+      - name: Run quality gates in dev shell
+        run: nix develop --command just ci
+
+      - name: Build reproducible binaries
+        run: nix build .#gateway .#operator
+
+      - name: Build reproducible OCI images
+        run: nix build .#gateway-image .#operator-image

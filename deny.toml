@@ -1,0 +1,30 @@
+[graph]
+all-features = true
+
+[licenses]
+version = 2
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "MPL-2.0",
+  "Unicode-3.0",
+]
+
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = [
+  # Transitive via kube-runtime; no maintained replacement available upstream yet.
+  "RUSTSEC-2025-0012",
+  # Transitive via backoff; no safe upgrade path in current kube stack.
+  "RUSTSEC-2024-0384",
+  # Transitive via kube-client rustls chain; no safe upgrade available.
+  "RUSTSEC-2025-0134",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

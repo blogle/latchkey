@@ -1,0 +1,70 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: latchkey-operator
+rules:
+  - apiGroups:
+      - latchkey.dev
+    resources:
+      - latchkeyservers
+      - latchkeyservers/status
+      - latchkeytools
+      - latchkeytools/status
+      - latchkeyprincipals
+      - latchkeyprincipals/status
+      - latchkeypolicies
+      - latchkeypolicies/status
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - services
+      - configmaps
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - update
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - update
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - networkpolicies
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: latchkey-operator
+subjects:
+  - kind: ServiceAccount
+    name: latchkey-operator
+    namespace: latchkey-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: latchkey-operator
