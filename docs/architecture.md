@@ -21,6 +21,12 @@ Latchkey is split into a control plane and data plane:
 4. Tool server calls upstream with server-held credentials.
 5. Gateway emits audit logs, metrics, and traces.
 
+## Milestone 1 thin slice
+
+- Gateway `POST /v1/mcp` routes to one in-cluster tool server.
+- Tool server calls a dedicated upstream stub with an API key from env/secret.
+- Static bearer token auth and principal tool allowlist are loaded from gateway env.
+
 ## Control plane boundaries
 
 - CRDs define desired state.

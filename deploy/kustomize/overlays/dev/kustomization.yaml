@@ -15,3 +15,9 @@ images:
   - name: ghcr.io/latchkey/latchkey-operator
     newName: latchkey-operator
     newTag: dev
+  - name: ghcr.io/latchkey/latchkey-tool-server
+    newName: latchkey-tool-server
+    newTag: dev
+  - name: ghcr.io/latchkey/latchkey-upstream-stub
+    newName: latchkey-upstream-stub
+    newTag: dev

@@ -15,8 +15,13 @@ resources:
   - rbac/operator-rbac.yaml
   - gateway/deployment.yaml
   - gateway/service.yaml
+  - tool-server/deployment.yaml
+  - tool-server/service.yaml
+  - upstream-stub/deployment.yaml
+  - upstream-stub/service.yaml
   - operator/deployment.yaml
   - networkpolicy/default-deny.yaml
+  - networkpolicy/milestone1-allow.yaml
 
 labels:
   - pairs:

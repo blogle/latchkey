@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: latchkey-upstream-stub
+spec:
+  selector:
+    app.kubernetes.io/name: latchkey-upstream-stub
+  ports:
+    - name: http
+      port: 8082
+      targetPort: 8082

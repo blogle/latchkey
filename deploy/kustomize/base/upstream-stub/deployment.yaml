@@ -1,39 +1,36 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: latchkey-gateway
+  name: latchkey-upstream-stub
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: latchkey-gateway
+      app.kubernetes.io/name: latchkey-upstream-stub
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: latchkey-gateway
+        app.kubernetes.io/name: latchkey-upstream-stub
     spec:
-      serviceAccountName: latchkey-gateway
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
       containers:
-        - name: gateway
-          image: ghcr.io/latchkey/latchkey-gateway:dev
+        - name: upstream-stub
+          image: ghcr.io/latchkey/latchkey-upstream-stub:dev
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
-              containerPort: 8080
+              containerPort: 8082
           env:
             - name: RUST_LOG
               value: info
-            - name: LATCHKEY_TOOL_SERVER_URL
-              value: http://latchkey-tool-server:8081
-            - name: LATCHKEY_STATIC_TOKENS
-              value: demo-agent=demo-token
-            - name: LATCHKEY_TOOL_ALLOWLIST
-              value: demo-agent=demo.echo
-            - name: LATCHKEY_RATE_LIMIT_PER_MINUTE
-              value: "30"
+            - name: EXPECTED_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: latchkey-upstream-credentials
+                  key: api-key
+                  optional: true
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -42,14 +39,14 @@ spec:
                 - ALL
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: 50m
+              memory: 64Mi
             limits:
-              cpu: 300m
-              memory: 256Mi
+              cpu: 200m
+              memory: 128Mi
           readinessProbe:
             httpGet:
-              path: /readyz
+              path: /healthz
               port: http
             periodSeconds: 10
           livenessProbe:

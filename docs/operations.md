@@ -3,6 +3,7 @@
 ## Health and readiness
 
 - Gateway exposes `/healthz` and `/readyz`.
+- Gateway MCP entrypoint is `POST /v1/mcp`.
 - Operator logs startup and watcher state transitions.
 
 ## Logging
@@ -27,3 +28,5 @@
 - Reproducible bundle build: `nix build`
 - Kind image load for dev overlay: `just kind-load-images`
 - Local deploy: `just deploy-dev`
+- In-cluster smoke test principal token: `demo-token` for principal `demo-agent`
+- Optional dev secret for tool->upstream key: `kubectl -n latchkey-system create secret generic latchkey-upstream-credentials --from-literal=api-key=<dev-only-value>`

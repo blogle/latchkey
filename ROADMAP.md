@@ -71,14 +71,16 @@ This is intentionally not feature complete. It’s the skeleton we iterate on.
   - rate limit (coarse)
 
 **Acceptance Criteria**
-- [ ] From a pod in-cluster: call gateway with an auth token and successfully invoke a tool
-- [ ] A principal without permission is denied and an audit event shows `decision=deny`
-- [ ] Gateway logs include `request_id`, `principal_id`, `tool_name`, latency, outcome
-- [ ] The tool server can access its secret; the client cannot retrieve it via gateway response
+- [x] From a pod in-cluster: call gateway with an auth token and successfully invoke a tool
+- [x] A principal without permission is denied and an audit event shows `decision=deny`
+- [x] Gateway logs include `request_id`, `principal_id`, `tool_name`, latency, outcome
+- [x] The tool server can access its secret; the client cannot retrieve it via gateway response
 - [ ] Load test: sustained calls do not exceed a small fixed CPU/RSS budget (record baseline)
 
 **Decision Notes**
-- (add as decisions are made: auth MVP mode, tool routing config source, etc.)
+- Auth MVP mode: static gateway-secret bearer token map from `LATCHKEY_STATIC_TOKENS`.
+- Tool routing source for Milestone 1: gateway env config (`LATCHKEY_TOOL_SERVER_URL`) while CRD routing is deferred to Milestone 2.
+- Default-deny network posture is preserved with explicit milestone-1 allow policies for client->gateway, gateway->tool-server, and tool-server->upstream paths.
 
 ---
 

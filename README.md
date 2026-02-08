@@ -29,12 +29,20 @@ Latchkey is a Kubernetes-native MCP gateway and operator that brokers short-live
 4. Verify pods:
    - `kubectl -n latchkey-system get pods`
 
+## Milestone 1 smoke test
+1. Run an in-cluster request with static auth:
+   - `kubectl -n latchkey-system run mcp-client --rm -it --restart=Never --image=curlimages/curl --command -- sh -c 'curl -sS -X POST http://latchkey-gateway/v1/mcp -H "Authorization: Bearer demo-token" -H "Content-Type: application/json" -d "{\"tool_name\":\"demo.echo\",\"params\":{\"message\":\"hello\"}}"'`
+2. Inspect gateway audit logs:
+   - `kubectl -n latchkey-system logs deploy/latchkey-gateway`
+
 ## Toolchain source of truth
 - `flake.nix` defines the pinned development and CI environment.
 
 ## Project layout
 - `crates/gateway`: HTTP gateway service stubs and middleware skeleton.
 - `crates/operator`: CRD types and watch loop scaffolding.
+- `crates/tool-server`: example in-cluster MCP tool server for milestone 1.
+- `crates/upstream-stub`: stub upstream API used by the example tool server.
 - `crates/core`: shared model and helper primitives.
 - `deploy/kustomize`: base manifests and dev overlay.
 - `docs`: spec, architecture, security, CRDs, operations, ADRs, and contribution guide.
@@ -48,3 +56,4 @@ Latchkey is a Kubernetes-native MCP gateway and operator that brokers short-live
 - `docs/contributing.md`
 - `docs/adr/0001-language.md`
 - `docs/adr/0002-auth-model.md`
+- `docs/adr/0003-milestone1-thin-slice.md`
