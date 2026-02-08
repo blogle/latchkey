@@ -16,8 +16,12 @@
 
 ## Kubernetes loop
 
+- Create the local kind cluster:
+  - `just kind-up`
+- Build and load gateway/operator images into kind:
+  - `just kind-load-images`
 - Apply base and dev overlay:
-  - `kubectl apply -k deploy/kustomize/overlays/dev`
+  - `just deploy-dev`
 
 ## Required checks before PR
 

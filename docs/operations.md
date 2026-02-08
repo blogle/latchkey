@@ -24,4 +24,6 @@
 
 - Local checks: `just ci`
 - Local build: `just build`
+- Reproducible bundle build: `nix build`
+- Kind image load for dev overlay: `just kind-load-images`
 - Local deploy: `just deploy-dev`

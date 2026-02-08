@@ -11,11 +11,23 @@ Latchkey is a Kubernetes-native MCP gateway and operator that brokers short-live
 1. Enter the reproducible environment:
    - `nix develop`
 2. Run local quality gates:
-   - `just ci`
-3. Start the gateway stub:
+   - `just fmt lint test build`
+3. Build reproducible binaries and images:
+   - `nix build`
+4. Start the gateway stub:
    - `cargo run -p latchkey-gateway`
-4. Start the operator stub (requires Kubernetes config):
+5. Start the operator stub (requires Kubernetes config):
    - `cargo run -p latchkey-operator`
+
+## Dev cluster bootstrap
+1. Create a kind cluster:
+   - `just kind-up`
+2. Load locally built images into kind:
+   - `just kind-load-images`
+3. Deploy the dev overlay:
+   - `just deploy-dev`
+4. Verify pods:
+   - `kubectl -n latchkey-system get pods`
 
 ## Toolchain source of truth
 - `flake.nix` defines the pinned development and CI environment.

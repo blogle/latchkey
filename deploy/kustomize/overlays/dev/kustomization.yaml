@@ -7,3 +7,11 @@ resources:
 patches:
   - path: patch-gateway-resources.yaml
   - path: patch-operator-resources.yaml
+
+images:
+  - name: ghcr.io/latchkey/latchkey-gateway
+    newName: latchkey-gateway
+    newTag: dev
+  - name: ghcr.io/latchkey/latchkey-operator
+    newName: latchkey-operator
+    newTag: dev

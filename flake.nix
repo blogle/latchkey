@@ -34,7 +34,7 @@
 
         gatewayImage = pkgs.dockerTools.buildLayeredImage {
           name = "latchkey-gateway";
-          tag = "latest";
+          tag = "dev";
           contents = [ gateway pkgs.cacert ];
           config = {
             Cmd = [ "${gateway}/bin/latchkey-gateway" ];
@@ -48,7 +48,7 @@
 
         operatorImage = pkgs.dockerTools.buildLayeredImage {
           name = "latchkey-operator";
-          tag = "latest";
+          tag = "dev";
           contents = [ operator pkgs.cacert ];
           config = {
             Cmd = [ "${operator}/bin/latchkey-operator" ];
@@ -56,12 +56,31 @@
             User = "65532:65532";
           };
         };
+
+        bootstrapBundle = pkgs.linkFarm "latchkey-bootstrap" [
+          {
+            name = "gateway";
+            path = gateway;
+          }
+          {
+            name = "operator";
+            path = operator;
+          }
+          {
+            name = "gateway-image";
+            path = gatewayImage;
+          }
+          {
+            name = "operator-image";
+            path = operatorImage;
+          }
+        ];
       in {
         packages = {
           inherit gateway operator;
           gateway-image = gatewayImage;
           operator-image = operatorImage;
-          default = gateway;
+          default = bootstrapBundle;
         };
 
         apps = {

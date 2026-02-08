@@ -39,10 +39,15 @@ This is a **living roadmap**. It will change as we learn. The goal is to keep it
 - Kustomize base + dev overlay
 
 **Acceptance Criteria**
-- [ ] `nix develop` works on a fresh clone
-- [ ] `just fmt lint test build` passes
-- [ ] `nix build` outputs binaries and OCI images
-- [ ] kustomize deploy brings up stub gateway/operator pods
+- [x] `nix develop` works on a fresh clone
+- [x] `just fmt lint test build` passes
+- [x] `nix build` outputs binaries and OCI images
+- [x] kustomize deploy brings up stub gateway/operator pods
+
+**Completion Note**
+- Default `nix build` now emits a single bootstrap bundle containing both binaries and OCI images.
+- Dev overlay now rewrites image references to locally built images (`latchkey-*:dev`) for in-cluster bootstrap.
+- Kind runbook is wired through `just kind-up`, `just kind-load-images`, and `just deploy-dev`.
 
 ---
 
@@ -272,4 +277,3 @@ This is intentionally not feature complete. It’s the skeleton we iterate on.
 - Multi-tenant namespace mode (stronger isolation)
 - Fuzzing harness for gateway request parsing
 - Performance profiling + hard budgets per request path
-
