@@ -3,6 +3,7 @@
 - Treat `docs/spec.md` as the authoritative MVP requirements. Do not silently weaken acceptance criteria or import the archived architecture.
 - Follow a spec-first workflow. Record implementation decisions separately from the supplied requirements.
 - Build one service/image with an embedded reconciler and exactly `search` and `exec`.
+- The same binary must offer standalone mode that never contacts or mocks Kubernetes. Local and Kubernetes configuration feed the same reconciler and execution paths. Keep real-binary, real-MCP-client, real-downstream end-to-end tests in CI without a cluster.
 - Use official rmcp for the wire protocol. Prove current and preceding-era compatibility and concurrent JSON/SSE execution before choosing a shared-client design.
 - Keep `Catalog::search` and `Router::exec` independent of MCP handlers. Never hold global locks across downstream I/O.
 - No Code Mode, OAuth broker, per-user policy, database, semantic search, durable events, stdio supervision or separate operator in MVP.

@@ -157,7 +157,7 @@ The implementation must not place a global mutex around:
 Use an SDK/transport configuration that supports concurrent Streamable HTTP requests.
 The design should assume many simultaneous calls to the same downstream MCP server.
 5. Kubernetes configuration
-Latchkey is configured through a CRD.
+In Kubernetes mode, Latchkey is configured through a CRD; standalone mode is defined in section 5.3.
 The MVP CRD is namespaced and should normally live in the same namespace as Latchkey. This keeps Secret access and RBAC simple.
 Suggested API:
 apiVersion: latchkey.thejeffer.net/v1alpha1
@@ -208,6 +208,13 @@ The MVP should require only:
 - read/watch the Secrets needed for configured static headers.
 For the first deployment, all credential Secrets should live in the Latchkey namespace.
 Cross-namespace Secret references are deferred.
+5.3 Mandatory standalone development and end-to-end mode
+Latchkey must be runnable and testable end to end on a developer machine and in CI without a Kubernetes cluster, Kubernetes API server, Kubernetes client dependency at runtime, or any Kubernetes mock/fake. This is an MVP requirement.
+The same production binary, MCP server, catalog, discovery, router, auth, telemetry, health handlers, timeout handling, cancellation, and shutdown path must be exercised in both modes. Only configuration and credential sources differ:
+- Kubernetes mode watches namespaced MCPService objects and referenced Secrets.
+- Standalone mode loads local service definitions with the same effective fields and behavior, plus static header values from local files or environment references. Local configuration must not contain credential values committed to the repository.
+Both sources feed one shared reconciliation path. Standalone mode must never initialize a Kubernetes client or require a kubeconfig. A local file change or explicit reload must exercise add, update, disable, delete, and credential rotation without restarting the gateway. Invalid local configuration or one unavailable downstream must not corrupt other catalog entries.
+The repository must provide a documented one-command local development path and an automated end-to-end suite that starts the actual Latchkey binary, real Streamable HTTP MCP test downstream servers, and a real MCP client. The suite must cover protocol negotiation, search, exec, catalog changes, static headers, failure isolation, cancellation, deadlines, graceful shutdown, trace propagation, secret redaction, and the 32-call concurrency benchmark. It must run on ordinary CI runners without kubectl, kind, a cluster, or Kubernetes mocks. Kubernetes integration tests are additional evidence for CRD watch, status, Secret and RBAC behavior; they do not replace the standalone end-to-end suite.
 6. Authentication and security
 Authentication is intentionally minimal in the MVP.
 6.1 Inbound authentication
@@ -233,6 +240,7 @@ Hard requirements:
 - Secret values must never appear in logs.
 - Secret values must never appear in traces.
 - Secret values must never appear in search results.
+- Local credential values must never appear in logs, traces, or search results.
 - Authorization headers must be redacted from structured logging.
 - CRDs contain references, not credentials.
 - Panic/error formatting must not dump request headers.
@@ -338,7 +346,7 @@ Must not depend on downstream MCP health.
 Process is ready to accept gateway traffic.
 Readiness should require:
 - MCP server initialized;
-- CRD watcher/reconciler functioning;
+- the selected configuration source and shared reconciler functioning (CRD watcher in Kubernetes mode; local loader/reload in standalone mode);
 - initial configuration reconciliation completed.
 It should not require every configured downstream to be healthy.
 A broken GitHub MCP server should not remove Anvil/Lific availability.
@@ -450,11 +458,11 @@ src/
   router.rs          # downstream tool resolution
   downstream.rs      # MCP client lifecycle/concurrency
   controller.rs      # MCPService watch/reconcile
-  config.rs
+  config.rs          # Kubernetes and standalone sources feeding one reconciler
   auth.rs            # static secret/header handling only
   telemetry.rs
   health.rs
-The Kubernetes reconciler and MCP gateway run in the same process.
+In Kubernetes mode, the Kubernetes reconciler and MCP gateway run in the same process. Standalone mode replaces only the configuration source; the gateway and shared reconciler remain the same.
 14. Definition of done
 Latchkey MVP is complete when all of the following are true.
 Gateway
@@ -470,6 +478,13 @@ Configuration
 - Deleting/disabling a CRD removes it from routing.
 - CRD status exposes discovery/health state.
 - Static auth headers can be sourced from Kubernetes Secrets.
+- The same binary runs end to end in standalone mode with local service definitions and file/environment credential references, without any Kubernetes component or mock.
+- Local configuration reload exercises add/update/disable/delete and credential rotation without a restart.
+Standalone development and testing
+- A documented one-command local run path starts Latchkey and real Streamable HTTP downstream fixtures.
+- Automated tests use the actual binary and MCP client to exercise the public endpoint and downstream behavior, including the 32-call benchmark.
+- The standalone end-to-end suite passes in CI without Kubernetes, kubectl, kind, or Kubernetes mocks.
+- Kubernetes integration tests independently verify CRD watches, status, Secret resolution/rotation, and RBAC.
 Search / execution
 - Search returns useful ranked tool matches with schemas.
 - Exec routes to the correct downstream service.
