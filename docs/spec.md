@@ -1,560 +1,515 @@
-# Spec: Latchkey MCP Gateway Operator Stack
-
-Latchkey is a Kubernetes-native gateway and operator that issues short-lived, scoped permissions to AI agents so they can use tools safely when no one is home.
-
-A Kubernetes-native, security-first control plane and data plane for hosting and brokering Model Context Protocol (MCP) tool servers. The system provisions MCP servers in-cluster, manages secret distribution to those servers, issues short-lived scoped access tokens to clients and agents, and proxies all MCP traffic through a single gateway endpoint.
-
-This spec focuses on service behavior, APIs, security boundaries, CRDs, and guardrails. It avoids environment-specific choices and keeps integrations (for example, observability platforms) at the API boundary level.
-
----
-
-## 1. Problem Statement
-
-LLM agents need access to tools and services that require credentials (API keys, OAuth tokens, and so on). Giving agents direct access to those secrets increases blast radius: prompt injection or tool misuse can exfiltrate credentials or perform unintended actions.
-
-We want a general-purpose system that:
-- Provisions MCP tool servers in Kubernetes.
-- Ensures agents never see real upstream credentials.
-- Enforces least privilege per agent and per tool call.
-- Provides strong auditing, observability, and guardrails.
-- Uses off-the-shelf identity and security components where practical.
-
----
-
-## 2. Goals
-
-### 2.1 Core
-1. Single gateway endpoint: clients talk only to the gateway; gateway dispatches to registered MCP servers.
-2. Operator-managed lifecycle: install, upgrade, and scale MCP servers; manage routing metadata.
-3. Secret isolation: real upstream credentials are accessible only to tool server workloads (or optional adapter workloads), never to agents.
-4. Per-agent authorization: each agent has an identity and tool-level permissions.
-5. Short-lived access: agents obtain an access token with very short TTL (target 1-2 minutes) for the intended tool usage.
-6. Defense in depth: network isolation, rate limits, request size limits, schema validation, and replay protection.
-7. Auditing and observability: every tool call is logged in a structured, queryable format; metrics and traces are emitted via standard interfaces.
-
-### 2.2 Secret distribution
-- Support both:
-  - Kubernetes Secrets (including SealedSecrets workflows that create Kubernetes Secrets)
-  - Vault (optional; via an abstract secret provider interface)
-- Keep current simple mode viable: use Kubernetes Secrets produced by SealedSecrets.
-
-### 2.3 General usability
-- Provide stable CRDs and APIs suitable for open-source adoption.
-- Provide deployment manifests for service-dedicated dependencies (for example, Redis for replay protection), but avoid bundling cluster-wide infrastructure.
-
----
-
-## 3. Non-Goals
-
-1. No LLM inference in this system. No token spending. No tool recommendation.
-2. Not a general CI and CD system. It can deploy MCP servers but does not replace GitOps.
-3. Not a full-blown secrets manager (Vault integration is optional and delegated).
-4. Not a general service mesh. We may optionally integrate with mTLS and mesh, but do not require it.
-5. Not a generic API gateway for arbitrary services; focus is MCP.
-
----
-
-## 4. High-Level Architecture
-
-### 4.1 Components
-
-**Control Plane**
-- **Latchkey Operator** (Kubernetes controller):
-  - Watches CRDs for MCPServer, MCPTool, AgentPrincipal, and Policy.
-  - Reconciles Deployments, Services, ConfigMaps, and NetworkPolicies.
-  - Manages gateway routing config (as CRD status or ConfigMap).
-
-**Data Plane**
-- **Latchkey Gateway** (HTTP service):
-  - Terminates client auth.
-  - Authorizes tool usage.
-  - Routes MCP requests to the correct MCP server.
-  - Produces audit logs, metrics, and traces.
-
-**Optional Supporting Services**
-- Replay cache (Redis-compatible) for one-time token or jti replay prevention.
-- Policy engine (optional) if externalized (for example, OPA). The gateway may embed a policy evaluator instead.
-
-### 4.2 Trust Boundaries
-
-- Agents and Clients: untrusted. Assume prompt injection and malicious inputs.
-- Latchkey Gateway: trusted to enforce policy, but should have minimal cluster privileges.
-- Latchkey Operator: highly privileged, but off request path.
-- MCP tool servers: semi-trusted adapters; isolated; no cluster API access; only have access to their own secrets and egress.
-
-### 4.3 Data flow summary
-
-1. Client authenticates (via OIDC or local service account secret) and requests an access token for specific tool scopes.
-2. Gateway issues or accepts a short-lived access token.
-3. Client makes MCP request to gateway.
-4. Gateway validates token, enforces tool, method, and payload guardrails, routes to MCP server.
-5. MCP server calls upstream services using server-held credentials.
-6. Gateway logs and emits telemetry.
-
----
-
-## 5. Identity and Authentication
-
-### 5.1 Supported auth modes
-
-**Mode A: OIDC / OAuth2 (recommended)**
-- External IdP such as Keycloak, Auth0, and so on.
-- Supports:
-  - service-to-service via client_credentials
-  - optional human login flows (not required)
-- Latchkey Gateway acts as a resource server (validates JWT) and optionally as a token exchanger (see 5.2).
-
-**Mode B: Gateway-managed service accounts**
-- Latchkey Gateway stores hashed client secrets for `LatchkeyPrincipal` resources.
-- Clients obtain tokens by presenting client_id + client_secret to the gateway.
-- This mode avoids external IdP dependencies but increases responsibility in this project.
-
-The system should support Mode A and may support Mode B. Mode A is preferred for off-the-shelf security.
-
-### 5.2 Token models
-
-Two models are supported; implement at least one:
-
-**Model 1: Direct JWT from IdP**
-- Client uses client_credentials to obtain JWT from IdP.
-- JWT contains scopes and roles that map to tools.
-- TTL is controlled by IdP.
-
-**Model 2: Latchkey-issued short-lived capability token (recommended for 1-2 minute goal)**
-- Client presents a valid IdP JWT to `/token/exchange`.
-- Latchkey Gateway validates identity and policy, then issues a capability token:
-  - TTL 60-120 seconds
-  - scope limited to tool(s) requested
-  - includes replay protection (`jti`)
-  - optionally bound to a single request hash
-- Client uses capability token to perform the MCP call.
-
-This model achieves the single tool request intent without making Latchkey a full identity provider.
-
-### 5.3 Token format and claims
-
-Capability token should be JWT (HS256 or RS256) with:
-- `iss`: gateway identifier
-- `aud`: `latchkey-gateway`
-- `sub`: principal id
-- `iat`, `exp` (<= 120s)
-- `jti`: unique id for replay prevention
-- `scope`: list of allowed tool scopes (fine-grained)
-- `tool`: optional single tool name restriction
-- `req`: optional request binding hash (sha256 over canonicalized request)
-
-Latchkey Gateway must reject:
-- expired tokens
-- wrong audience
-- revoked principals
-- replayed `jti`
-- scope mismatches
-
----
-
-## 6. Authorization and Policy
-
-### 6.1 Scope model
-
-A tool scope is the primary authorization unit:
-- `tools:<toolName>:call`
-- `tools:<toolName>:read`
-- `tools:<toolName>:write`
-- `tools:<toolName>:admin` (discouraged)
-- optional operation-level scopes: `tools:<toolName>:op:<operation>`
-
-Policies map principals to scopes and constraints:
-- tool allowlist
-- allowed operations and methods
-- parameter schema constraints
-- rate limits and quotas
-- maximum payload sizes
-
-### 6.2 Authorization checks (mandatory)
-
-For every MCP request:
-- Verify identity token or capability token.
-- Resolve tool to backend MCP server mapping.
-- Enforce:
-  - tool allowlist
-  - operation allowlist (if applicable)
-  - schema validation for params
-  - method restrictions (for example, no destructive operations)
-  - concurrency and rate limit
-
-### 6.3 Break-glass model (recommended)
-
-Provide a policy tier for dangerous operations:
-- Requires a different scope group
-- Optional second factor / approval out of band (integrate via webhook)
-- All break-glass usage must be highly audited
-
----
-
-## 7. Secret Distribution
-
-### 7.1 Secret provider interface
-
-Latchkey Operator supports `SecretSource` backends:
-- KubernetesSecret
-  - References a Secret key in a namespace.
-  - Compatible with SealedSecrets.
-- VaultSecret (optional)
-  - References a Vault path + key.
-  - Operator or sidecar injects secret into tool server pod.
-  - Prefer short-lived credentials when upstream supports them.
-
-### 7.2 Binding secrets to tool servers
-
-Secrets must be bound only to MCP tool server workloads, never to agents.
-
-Mechanisms:
-- Mount as environment variables or files into MCP server pod.
-- Optionally inject via initContainer or CSI.
-- Ensure:
-  - Secrets are not logged
-  - File permissions are restrictive
-  - Pod specs prevent hostPath mounts and privilege escalation
-
----
-
-## 8. Kubernetes CRDs
-
-### 8.1 `LatchkeyServer` (CRD)
-
-Represents a deployable MCP server instance (tool adapter).
-
-**Spec fields (illustrative):**
-- `image`: container image
-- `replicas`: desired replicas
-- `transport`: `http` | `stdio` (stdio implies a sidecar and proxy pattern)
-- `servicePort`: port exposed for gateway routing
-- `resources`: cpu and memory
-- `securityContext`: baseline hardening options
-- `egressPolicy`: allowed egress destinations (CIDR and hostnames via egress proxy)
-- `secrets`: list of `LatchkeySecretBindingRef`
-- `health`: readiness and liveness probes
-- `metadata`: labels and annotations
-
-**Status fields:**
-- `readyReplicas`
-- `endpoints`: service DNS and ports
-- `conditions`: Ready, Degraded, and so on
-
-### 8.2 `LatchkeyTool` (CRD)
-
-Declares a tool that clients can invoke, and maps it to a LatchkeyServer.
-
-**Spec fields:**
-- `toolName`: stable public name
-- `serverRef`: target LatchkeyServer
-- `toolSelector`: mapping to MCP method and tool name on server
-- `operations`: optional operation list, with:
-  - `opName`
-  - `allowed`: true and false
-  - `schema`: JSON schema for params
-  - `risk`: read | write | destructive
-- `limits`:
-  - `maxPayloadBytes`
-  - `maxResponseBytes`
-  - `timeoutMs`
-  - `rateLimit`: requests per minute
-- `audit`:
-  - `redactionRules` (fields to hash and redact)
-- `visibility`: which principals and groups can discover the tool (optional)
-
-### 8.3 `LatchkeyPrincipal` (CRD)
-
-Represents an agent and client identity recognized by Latchkey.
-
-**Spec fields:**
-- `principalId`: stable identifier
-- `authMode`: `oidc` | `gateway-secret`
-- OIDC:
-  - `issuer`
-  - `subjectMatch` or `clientId`
-  - optional claim mappings (group and role)
-- Gateway-secret:
-  - `clientId`
-  - `secretRef` (Kubernetes Secret; stored hashed at rest by gateway if possible)
-- `policyRefs`: list of Policy bindings
-- `enabled`: bool
-- `tokenPolicy`:
-  - `capabilityTokensEnabled`: bool
-  - `capabilityTTLSeconds`: [60..120]
-  - `requireRequestBinding`: bool
-  - `allowToolDiscovery`: bool
-
-### 8.4 `LatchkeyPolicy` (CRD)
-
-Binds principals and groups to scopes and constraints.
-
-**Spec fields:**
-- `subjects`: principal ids or OIDC claim selectors
-- `scopes`: list of tool scopes
-- `constraints`:
-  - allowed operations subset
-  - per-scope rate limits
-  - time windows
-  - max concurrency
-- `breakGlass`: bool
-- `auditLevel`: normal | verbose
-
----
-
-## 9. Latchkey Gateway API Surface
-
-The gateway exposes two categories: auth and token, and MCP proxy.
-
-### 9.1 Token exchange endpoints
-
-- `POST /v1/token/exchange`
-  - Input: bearer token from IdP + requested scopes + optional tool and op.
-  - Output: short-lived capability token.
-  - Must enforce:
-    - principal enabled
-    - requested scopes subset of allowed
-    - TTL bounds
-  - Must log issuance (audit).
-
-- `POST /v1/token/introspect` (optional)
-  - For debugging and policy evaluation visibility.
-  - Must require admin scope and redact sensitive claims.
-
-### 9.2 Tool discovery endpoints (optional, guarded)
-
-- `GET /v1/tools`
-  - Returns tools visible to principal.
-  - Should be optional or restricted to reduce tool enumeration risk.
-
-- `GET /v1/tools/{toolName}`
-  - Returns schema and limits (sanitized).
-
-### 9.3 MCP proxy endpoints
-
-- `POST /v1/mcp`
-  - Generic MCP request router. Body is MCP request.
-  - Gateway determines destination tool server based on request tool name.
-  - Enforces authz, size and time limits, and validation.
-  - Returns MCP response.
-
-- `POST /v1/mcp/servers/{serverName}`
-  - Debug and diagnostic direct route (admin only).
-
-### 9.4 Admin endpoints
-
-- `GET /healthz`, `GET /readyz`
-- `GET /metrics` (Prometheus)
-
-No imperative create tool APIs are required if CRDs are the source of truth.
-
----
-
-## 10. Routing and Dispatch
-
-### 10.1 Service discovery
-Latchkey Gateway routes to tool servers using:
-- Kubernetes DNS service name (ClusterIP)
-- optionally endpoint slices for L7 load balancing
-
-### 10.2 Session affinity
-If MCP transport requires session stickiness, gateway must support:
-- `session_id` in request metadata
-- consistent hashing to route same session to same server instance
-
-### 10.3 Failure behavior
-- Retries: default off for non-idempotent operations
-- Circuit breakers per tool server
-- Timeouts per tool (default conservative)
-- Backpressure and max inflight requests per principal
-
----
-
-## 11. Guardrails and Hardening
-
-### 11.1 Network controls
-- Agents should have egress restricted to only Latchkey Gateway.
-- Latchkey Gateway should have egress only to tool servers and IdP endpoints.
-- Tool servers should have egress only to upstream APIs they need.
-
-### 11.2 Runtime controls
-- Run as non-root
-- Drop Linux capabilities
-- readOnlyRootFilesystem where possible
-- deny hostPath, hostNetwork, privileged
-- set resource limits to prevent DoS
-
-### 11.3 Request controls
-For each tool:
-- max payload bytes
-- max response bytes
-- strict JSON schema validation on params
-- disallow unknown fields by default
-- enforce timeouts per operation
-- rate limit per principal + per tool
-
-### 11.4 Replay and misuse prevention
-For capability tokens:
-- store `jti` in a replay cache for `exp + skew`
-- reject repeats
-- optionally bind token to request hash
-
-### 11.5 Tool risk partitioning
-Classify operations:
-- read: safe default
-- write: allowed with constraints
-- destructive: off by default; break-glass scope only
-
-### 11.6 Sensitive output handling
-- Redact known secret patterns in logs.
-- Allow per-tool redaction rules.
-- Consider response filtering policies (for example, block returning credentials).
-
----
-
-## 12. Auditing
-
-### 12.1 Audit event model
-Every request produces an audit event:
-
-Fields (structured JSON):
-- `timestamp`
-- `principal_id`
-- `auth_mode` (oidc and capability)
-- `token_jti` (if capability)
-- `tool_name`
-- `operation` (if applicable)
-- `request_id` (gateway-generated)
-- `session_id` (if present)
-- `decision` (allow and deny)
-- `deny_reason` (if denied)
-- `latency_ms`
-- `backend_server`
-- `backend_latency_ms`
-- `status` (success and error)
-- `error_class` (timeout, validation, backend, and so on)
-- `request_params_redacted` (or hashed)
-- `response_summary` (size, schema version)
-
-### 12.2 Audit sinks
-Audit events must be emitted to:
-- stdout (for cluster log collectors), and or
-- a pluggable sink interface:
-  - HTTP webhook
-  - file
-  - syslog
-  - OpenTelemetry logs (preferred)
-
-This spec defines the event format; integrations are out of scope.
-
----
-
-## 13. Observability
-
-### 13.1 Metrics (Prometheus-compatible)
-Expose `/metrics` with:
-- `requests_total{tool,principal,decision}`
-- `request_latency_ms_bucket{tool}`
-- `backend_latency_ms_bucket{server}`
-- `rate_limited_total{principal,tool}`
-- `validation_fail_total{tool}`
-- `token_exchange_total{principal}`
-- `replay_reject_total`
-- `inflight_requests{principal}`
-
-### 13.2 Tracing (OpenTelemetry)
-Emit spans for:
-- token exchange
-- policy evaluation
-- MCP dispatch
-- backend call
-
-Propagation:
-- support W3C traceparent headers.
-
-### 13.3 Health endpoints
-- `/healthz` liveness
-- `/readyz` readiness (checks: policy loaded, replay cache reachable if enabled)
-
----
-
-## 14. Deployment Model
-
-### 14.1 Required components (dedicated to this service)
-- Latchkey Operator deployment
-- Latchkey Gateway deployment
-- CRDs installed cluster-wide
-
-### 14.2 Optional dependencies (bundled manifests acceptable)
-- Redis (or compatible) for replay cache
-- Postgres only if required for state; prefer CRD source of truth
-
-The project should provide Helm and or Kustomize:
-- `charts/latchkey`
-- `deploy/kustomize/base` and `deploy/kustomize/overlays/*`
-
-### 14.3 External dependencies (integration-only)
-- OIDC provider (Keycloak, Auth0, and so on): treated as external; define OIDC boundary only.
-- Metrics and tracing backends: integration-only.
-
----
-
-## 15. Security Threat Model (Summary)
-
-### 15.1 Threats addressed
-- Prompt injection leading to:
-  - credential exfiltration (prevented by server-side secrets)
-  - unauthorized tool calls (policy enforcement + scopes)
-  - destructive actions (risk partitioning + break-glass)
-- Token theft:
-  - short TTL
-  - replay protection (jti)
-  - optional request binding
-- Lateral movement:
-  - network policy and egress allowlists
-  - tool server isolation
-- Abuse and DoS:
-  - rate limiting, payload limits, timeouts
-  - resource limits
-
-### 15.2 Threats not fully solved
-- If a permitted tool is dangerous, the agent can still misuse it.
-  - Mitigation: granular operations + schema constraints + approvals for destructive actions.
-- Compromise of operator:
-  - mitigated by separating operator from request path; still high impact.
-- Vulnerable tool servers:
-  - treat as untrusted; sandbox; minimal privileges; version pinning.
-
----
-
-## 16. Roadmap (Suggested Phases)
-
-**Phase 1 (MVP)**
-- CRDs: LatchkeyServer, LatchkeyTool, LatchkeyPrincipal, LatchkeyPolicy
-- Operator deploys tool servers and publishes routing config
-- Gateway routes MCP calls, enforces allowlist + schema + rate limits
-- Basic audit logs and metrics
-- Kubernetes Secret-based secret binding (SealedSecrets compatible)
-
-**Phase 2**
-- Capability token exchange with 1-2 minute TTL + jti replay cache
-- Tool discovery endpoint (guarded)
-- Vault SecretSource
-- OTel tracing
-
-**Phase 3**
-- Request binding to token (single-call tokens)
-- Break-glass workflow hooks
-- Advanced policy expressions (OPA integration)
-
----
-
-## 17. Acceptance Criteria
-
-1. Agents can only reach Latchkey Gateway; gateway can reach tool servers; tool servers can reach only required upstreams.
-2. Agents never have direct access to upstream API keys.
-3. A principal with no scope cannot invoke any tool; attempts are denied and audited.
-4. Capability tokens (if enabled) expire within configured TTL and cannot be replayed.
-5. Every tool call yields an audit event with the defined schema.
-6. Metrics expose request counts, latency, deny reasons, and rate-limit behavior.
-7. Tool servers are provisioned and updated declaratively via CRDs.
+Latchkey MVP Requirements
+Status: Draft
+Date: 2026-09-30
+Purpose: Define the minimum viable Latchkey release capable of replacing the current Nexus + compatibility gateway path for ChatGPT and other MCP clients.
+1. Goal
+Latchkey is a lightweight, horizontally scalable MCP gateway.
+Its MVP exists to solve one problem well:
+Present a very small, stable MCP surface to clients while discovering, searching, and concurrently routing calls to many downstream MCP services.
+
+The MVP is not intended to reproduce every Nexus feature. It should replace the parts of Nexus that are valuable in the current environment while deliberately deferring advanced authentication, policy, persistence, and orchestration features.
+The intended initial path is:
+ChatGPT / MCP client
+        |
+        v
+OpenAI tunnel / ingress
+        |
+        v
+    Latchkey
+   /   |   \
+  v    v    v
+Anvil Lific GitHub ...
+There should be no Nexus-style compatibility sidecar between the tunnel and Latchkey.
+2. MVP decisions
+Required for MVP
+- One stateless service and one OCI image.
+- Direct MCP server compatibility with current clients.
+- Two public tools:
+  - search
+  - exec
+- Downstream MCP discovery and routing.
+- Kubernetes MCPService CRD configuration.
+- Static downstream credentials sourced from Kubernetes Secrets.
+- Minimal inbound authentication assumptions.
+- OpenTelemetry traces, metrics, and structured logs.
+- True concurrent downstream execution within a single Latchkey replica.
+- Horizontal scaling without sticky sessions or shared persistent state.
+- Very small CPU, memory, and image footprint.
+- Health/readiness endpoints suitable for Kubernetes.
+- Graceful downstream failure isolation.
+Explicitly not an MVP gate
+- Server-side Code Mode / TypeScript sandbox.
+- OAuth delegation or token exchange.
+- Per-user downstream credentials.
+- Fine-grained scopes or authorization policy.
+- Dynamic client registration.
+- Multi-tenant isolation.
+- Persistent database or cache.
+- MCP event/subscription persistence.
+- Admin UI.
+- Semantic/vector search.
+- stdio-managed downstream processes.
+- General workflow engine.
+- Automatic tool approval policy.
+3. Protocol requirements
+Latchkey must expose an MCP endpoint directly to clients.
+3.1 Compatibility
+The implementation must use a current MCP SDK with support for the 2026-07-28 MCP specification and compatibility with the immediately preceding MCP protocol era.
+For the initial Rust implementation, the official rmcp SDK is preferred.
+Latchkey must rely on the SDK for:
+- protocol framing;
+- version negotiation;
+- Streamable HTTP behavior;
+- cancellation;
+- standard MCP errors;
+- request/response metadata;
+- trace-context propagation primitives.
+Latchkey must not implement a custom MCP wire protocol.
+3.2 Stateless upstream server
+The public MCP endpoint must operate without server-local client session state for the MVP.
+Any healthy Latchkey replica must be able to serve any request.
+Requirements:
+- no sticky sessions;
+- no per-client in-memory state required for search or exec;
+- no shared database required between replicas;
+- replicas may be added or removed without draining protocol state;
+- Kubernetes Service load balancing must be sufficient.
+3.3 Public MCP surface
+The MVP exposes exactly two gateway tools.
+search
+Search the current downstream tool catalog.
+Suggested input:
+{
+  "query": "create an anvil session",
+  "service": "anvil",
+  "limit": 10
+}
+service and limit are optional.
+Each result should contain enough information for a model or Code Mode caller to invoke the tool without another discovery round trip:
+{
+  "name": "anvil__session_create",
+  "service": "anvil",
+  "description": "Create an Anvil worker session",
+  "input_schema": {}
+}
+Search requirements:
+- local/in-memory;
+- no downstream network call on the normal search path;
+- exact-name matches rank highest;
+- prefix/name matches outrank description-only matches;
+- deterministic ordering for equivalent scores;
+- namespace/service filtering;
+- configurable result limit with a conservative upper bound;
+- no embedding model or vector database in MVP.
+A lightweight lexical scoring implementation is sufficient.
+exec
+Execute one fully qualified downstream tool.
+Suggested input:
+{
+  "name": "anvil__session_create",
+  "arguments": {
+    "project": "..."
+  }
+}
+Requirements:
+- route using the current catalog;
+- forward arguments without lossy transformation;
+- preserve structured downstream MCP results;
+- preserve useful downstream MCP errors;
+- reject unknown tools locally;
+- enforce configurable request deadlines;
+- honor cancellation when the upstream request is cancelled;
+- do not serialize independent tool calls.
+The canonical tool name format is:
+<service-prefix>__<downstream-tool-name>
+Examples:
+anvil__session_create
+github__get_file_contents
+lific__create_issue
+4. Downstream MCP support
+4.1 MVP transport
+MVP downstream services use Streamable HTTP MCP.
+stdio process management is deferred.
+Each configured service has:
+- endpoint URL;
+- stable service prefix;
+- enabled/disabled state;
+- request timeout;
+- optional static headers sourced from Secrets;
+- discovery refresh configuration.
+4.2 Discovery
+Latchkey maintains an in-memory catalog of downstream tools.
+Discovery occurs:
+1. at process startup;
+2. when an MCPService object is added or changed;
+3. periodically as a safety net.
+A failure to discover one downstream service must not make the whole gateway unavailable.
+The last known successful catalog may remain available while a downstream is temporarily unhealthy, but exec must return a clear downstream-unavailable error if execution cannot be performed.
+4.3 Concurrency
+This is a hard MVP requirement.
+A single slow downstream request must not block unrelated requests to that service or any other service.
+The implementation must not place a global mutex around:
+- a downstream client;
+- tool execution;
+- the catalog;
+- transport send/receive;
+- service reconciliation.
+Use an SDK/transport configuration that supports concurrent Streamable HTTP requests.
+The design should assume many simultaneous calls to the same downstream MCP server.
+5. Kubernetes configuration
+Latchkey is configured through a CRD.
+The MVP CRD is namespaced and should normally live in the same namespace as Latchkey. This keeps Secret access and RBAC simple.
+Suggested API:
+apiVersion: latchkey.thejeffer.net/v1alpha1
+kind: MCPService
+metadata:
+  name: anvil
+  namespace: latchkey
+spec:
+  endpoint: http://anvil-mcp.anvil.svc.cluster.local:8081/mcp
+
+  # Defaults to metadata.name.
+  prefix: anvil
+
+  enabled: true
+  timeout: 180s
+
+  discovery:
+    refreshInterval: 5m
+
+  headersFrom:
+    - header: Authorization
+      secretKeyRef:
+        name: anvil-mcp-credentials
+        key: authorization
+The Secret should contain the complete header value when possible, for example:
+Bearer <token>
+This avoids building provider-specific credential formatting into Latchkey.
+5.1 CRD behavior
+Applying a new MCPService must not require a Latchkey restart.
+On add/update/delete:
+- reconcile the service;
+- perform discovery;
+- atomically update the in-memory routing catalog;
+- expose reconciliation state through CRD status.
+Suggested status:
+status:
+  observedGeneration: 4
+  toolCount: 17
+  lastDiscoveredAt: "2026-09-30T20:00:00Z"
+  conditions:
+    - type: Ready
+      status: "True"
+A malformed or unavailable downstream service should receive a useful status condition without making unrelated services unavailable.
+5.2 RBAC
+The MVP should require only:
+- read/watch/list MCPService resources;
+- update MCPService/status;
+- read/watch the Secrets needed for configured static headers.
+For the first deployment, all credential Secrets should live in the Latchkey namespace.
+Cross-namespace Secret references are deferred.
+6. Authentication and security
+Authentication is intentionally minimal in the MVP.
+6.1 Inbound authentication
+Latchkey is expected to run behind a trusted ingress, private network, tunnel, or authentication proxy.
+MVP requirements:
+- support unauthenticated MCP at the process level when protected externally;
+- optionally support one static bearer token for direct deployments;
+- never require a built-in OAuth server for MVP.
+Advanced inbound identity is deferred.
+6.2 Downstream authentication
+MVP supports static downstream headers sourced from Kubernetes Secrets.
+This is sufficient for API keys, PATs, bearer tokens, and pre-generated service credentials.
+Deferred:
+- OAuth authorization-code flows;
+- per-user credential delegation;
+- refresh-token management;
+- scope negotiation;
+- token exchange;
+- dynamic client registration;
+- downstream identity impersonation.
+6.3 Secret handling
+Hard requirements:
+- Secret values must never appear in logs.
+- Secret values must never appear in traces.
+- Secret values must never appear in search results.
+- Authorization headers must be redacted from structured logging.
+- CRDs contain references, not credentials.
+- Panic/error formatting must not dump request headers.
+6.4 Sandbox boundary
+Because Code Mode is not part of MVP, the gateway does not initially execute arbitrary user code.
+This substantially reduces the initial security surface.
+7. OpenTelemetry and observability
+OpenTelemetry is an MVP requirement, not a later enhancement.
+Latchkey should emit OTLP and integrate cleanly with an existing collector.
+Collector unavailability must not prevent Latchkey from serving requests.
+7.1 Traces
+Required spans include:
+mcp.request
+gateway.search
+gateway.exec
+catalog.reconcile
+downstream.discover
+downstream.call
+Useful span attributes include:
+- gateway tool (search / exec);
+- downstream service;
+- downstream MCP tool;
+- result status;
+- timeout/cancellation status;
+- protocol version;
+- replica/pod identity.
+Do not put full arbitrary argument payloads into traces by default.
+Latchkey should propagate W3C trace context to downstream HTTP MCP services.
+7.2 Metrics
+At minimum:
+- inbound request count;
+- inbound request latency;
+- active requests;
+- search latency;
+- exec latency;
+- downstream request count;
+- downstream request latency;
+- downstream error count;
+- downstream timeout count;
+- downstream in-flight requests;
+- discovery success/failure count;
+- discovery duration;
+- catalog service count;
+- catalog tool count.
+Metrics must avoid unbounded labels.
+Service name is acceptable. Arbitrary argument values are not.
+7.3 Logs
+Structured JSON logs.
+Each request log should include the trace ID when tracing is active.
+Normal successful requests should not require verbose per-packet transport logs.
+8. Performance and scalability requirements
+Latchkey should be small enough that adding replicas is cheap.
+8.1 Architecture
+MVP has:
+- one binary;
+- one OCI image;
+- no database;
+- no Redis;
+- no sidecar;
+- no embedded search service;
+- no background worker deployment;
+- no leader election requirement.
+Every replica independently watches configuration and maintains its own in-memory catalog.
+8.2 Resource targets
+Initial targets:
+- Kubernetes request: approximately 10m CPU / 32Mi memory;
+- idle RSS target: <= 48MiB;
+- normal memory limit target: <= 96MiB;
+- compressed OCI image target: <= 30MiB;
+- effectively zero CPU while idle except watches/health/discovery timers.
+These are engineering targets rather than protocol guarantees. Material regressions should require justification.
+8.3 Horizontal scaling
+Latchkey must scale from 1 to at least 10 replicas without:
+- shared persistence;
+- leader election;
+- sticky sessions;
+- duplicate side effects caused by internal retries.
+Configuration convergence should be eventual and quick enough for normal Kubernetes operations.
+8.4 Concurrency acceptance benchmark
+The Nexus failure mode must have an explicit regression test.
+Using a test downstream MCP server that records tool-call arrival times:
+- start 32 concurrent exec requests;
+- all 32 must be accepted concurrently by one Latchkey replica;
+- gateway-added dispatch spread should remain below 100 ms on normal development/CI hardware;
+- one intentionally slow request must not delay unrelated calls;
+- cancellation of one request must not cancel or block others.
+The exact latency number may be adjusted after the first implementation benchmark, but serialization is an automatic MVP failure.
+9. Reliability requirements
+- One unhealthy downstream must not affect other downstream services.
+- A downstream timeout must release all gateway resources associated with the request.
+- Client cancellation must propagate where supported.
+- Graceful shutdown must stop accepting new work and allow bounded in-flight completion.
+- Discovery failures must be visible through OTel and CRD status.
+- Catalog updates must be atomic from the perspective of search and exec.
+- Removed/disabled services must stop accepting new executions promptly.
+- Latchkey must not automatically retry mutation tools unless the protocol or caller provides an explicit idempotency mechanism.
+10. Kubernetes health endpoints
+The same binary should expose lightweight HTTP health endpoints.
+/healthz
+Process is alive.
+Must not depend on downstream MCP health.
+/readyz
+Process is ready to accept gateway traffic.
+Readiness should require:
+- MCP server initialized;
+- CRD watcher/reconciler functioning;
+- initial configuration reconciliation completed.
+It should not require every configured downstream to be healthy.
+A broken GitHub MCP server should not remove Anvil/Lific availability.
+11. Code Mode decision
+Recommendation: not an MVP gate
+Server-side Code Mode is strategically valuable but should not block the first usable Latchkey release.
+The first milestone already solves the critical problems:
+- stable two-tool client surface;
+- small tool context;
+- dynamic service discovery;
+- concurrent routing;
+- observability;
+- Kubernetes-native configuration;
+- removal of Nexus and the compatibility shim.
+Adding arbitrary TypeScript execution introduces a separate set of concerns:
+- sandbox escape risk;
+- memory limits;
+- CPU/fuel accounting;
+- wall-clock deadlines;
+- output limits;
+- cancellation;
+- module policy;
+- deterministic host bindings;
+- code caching;
+- denial-of-service controls.
+Those concerns are large enough to deserve their own milestone.
+11.1 MVP architectural requirement for future Code Mode
+Although Code Mode is deferred, the MVP must expose internal abstractions that let a future sandbox use exactly the same catalog and execution path as the public tools.
+Conceptually:
+             +----------------+
+MCP search ->|                |
+MCP exec   ->| Catalog/Router |-> downstream MCP
+             |                |
+future code->|                |
+             +----------------+
+Do not implement search and exec as logic tied directly to MCP request handlers.
+They should call reusable internal APIs such as:
+Catalog::search(...)
+Router::exec(...)
+11.2 Post-MVP Code Mode shape
+A future third public tool could be:
+code(source: string) -> JSON
+The sandbox would execute TypeScript/JavaScript and expose only constrained host functions:
+await latchkey.search("anvil session");
+await latchkey.exec("anvil__session_create", { ... });
+Preferred implementation direction:
+- JavaScript runtime isolated with WASM or an equivalently strong sandbox boundary;
+- TypeScript transpilation without package installation;
+- no direct network access;
+- no filesystem access;
+- no environment-variable access;
+- no Kubernetes API access;
+- no direct Secret access;
+- only search and exec host capabilities;
+- Promise.all and normal async orchestration supported;
+- strict memory limit;
+- strict execution/fuel limit;
+- wall-clock timeout;
+- bounded stdout/result size.
+Code Mode becomes an MVP+1 gate, not an MVP gate.
+12. Non-goals for MVP
+The following should not be implemented unless a concrete blocker appears during migration.
+Authentication/policy
+- OAuth broker;
+- authorization-server metadata hosting;
+- dynamic client registration;
+- token exchange;
+- scope intersection;
+- per-tool ACL language;
+- per-user policy;
+- credential database.
+MCP platform features
+- durable tasks;
+- durable subscriptions;
+- ChatGPT MCP Events delivery;
+- webhook subscription storage;
+- prompts/resources aggregation;
+- sampling proxy;
+- elicitation proxy.
+These can be added later using the MCP SDK rather than designed into the first gateway.
+Operations
+- web admin UI;
+- database-backed configuration;
+- GitOps replacement;
+- separate operator/controller binary;
+- HA coordinator;
+- distributed cache.
+Search
+- embeddings;
+- vector database;
+- LLM-based ranking;
+- remote search service.
+The tool catalog is expected to remain small enough for lexical in-memory search during MVP.
+13. Suggested implementation shape
+Preferred stack:
+Rust
+Tokio
+official rmcp SDK
+kube-rs
+tracing + OpenTelemetry
+serde / schemars
+rustls
+Internal modules should remain small:
+src/
+  main.rs
+  server.rs          # public MCP search/exec surface
+  catalog.rs         # immutable/current tool catalog
+  search.rs          # lexical ranking
+  router.rs          # downstream tool resolution
+  downstream.rs      # MCP client lifecycle/concurrency
+  controller.rs      # MCPService watch/reconcile
+  config.rs
+  auth.rs            # static secret/header handling only
+  telemetry.rs
+  health.rs
+The Kubernetes reconciler and MCP gateway run in the same process.
+14. Definition of done
+Latchkey MVP is complete when all of the following are true.
+Gateway
+- One OCI image deploys one stateless service.
+- Public MCP surface contains only search and exec.
+- OpenAI tunnel can point directly at Latchkey with no compatibility service.
+- Current MCP clients can negotiate and invoke both gateway tools.
+- Tool names are stable and namespaced.
+Configuration
+- MCPService CRD exists.
+- Adding a CRD dynamically adds a downstream service.
+- Updating a CRD reconfigures it without restarting Latchkey.
+- Deleting/disabling a CRD removes it from routing.
+- CRD status exposes discovery/health state.
+- Static auth headers can be sourced from Kubernetes Secrets.
+Search / execution
+- Search returns useful ranked tool matches with schemas.
+- Exec routes to the correct downstream service.
+- Downstream results and structured errors survive the gateway.
+- A failed downstream does not affect unrelated services.
+- Concurrent calls are not serialized.
+Observability
+- OTLP traces are emitted.
+- W3C trace context propagates downstream.
+- Core gateway/downstream metrics exist.
+- Structured logs contain trace IDs.
+- Credentials and arbitrary tool arguments are not leaked.
+Scalability
+- One replica passes the concurrent dispatch benchmark.
+- Multiple replicas require no sticky sessions.
+- Multiple replicas require no shared database/cache.
+- Resource and image-size targets are measured and documented.
+Migration proof
+- Anvil is usable through Latchkey.
+- Lific is usable through Latchkey.
+- GitHub MCP is usable through Latchkey.
+- A ChatGPT session can use search then exec through the OpenAI tunnel.
+- Repeated concurrent read-only calls show reliable fan-out.
+- The Nexus + compat path can be disabled without losing required gateway behavior.
+15. MVP+1 priorities
+Once the MVP is stable, investigate in roughly this order:
+1. Server-side Code Mode / TypeScript sandbox.
+2. Better authorization and per-user identity propagation.
+3. Scoped downstream credentials and policy.
+4. MCP Events / durable subscriptions.
+5. Richer service health/circuit breaking.
+6. Optional semantic search if lexical search becomes insufficient.
+7. Additional downstream transports only if a real service requires them.
+16. Core design principle
+Latchkey should remain a gateway, not become an application platform by accident.
+For the MVP:
+CRDs describe services.
+Latchkey discovers tools.
+search finds tools.
+exec invokes tools.
+OTel explains what happened.
+Replicas scale horizontally.
+Everything else must earn its way into the design.

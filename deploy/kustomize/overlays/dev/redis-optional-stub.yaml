@@ -1,6 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: redis-optional-stub
-data:
-  note: "Optional Redis overlay placeholder for replay cache support"
