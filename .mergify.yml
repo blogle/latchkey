@@ -4,7 +4,7 @@
 queue_rules:
   - name: bootstrap
     merge_method: squash
-    conditions:
+    merge_conditions:
       - check-success=pr-fast
       - check-success=candidate-ready
 
