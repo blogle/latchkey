@@ -4,8 +4,9 @@
 /result-*
 *.log
 
-# Marker written by `just setup`; holds the toolchain/lock fingerprint
-/.setup-marker
+# Cached native dev environment (`just setup`; see docs/development.md)
+/.dev/
 
 # Local tooling state
 .direnv/
+__pycache__/
