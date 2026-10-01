@@ -18,6 +18,7 @@ import sys
 import tempfile
 import shutil
 import tomllib
+from pathlib import Path
 from typing import Any
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -209,6 +210,7 @@ def _cached_tools(source: str) -> tuple[str, str]:
 
 
 def execute(args: argparse.Namespace) -> None:
+    implementation_root = Path(__file__).resolve().parents[2]
     source = os.path.realpath(args.source)
     repository = os.path.realpath(args.repository)
     trusted = os.path.realpath(args.trusted)
@@ -267,7 +269,7 @@ def execute(args: argparse.Namespace) -> None:
             version = plan_data.get("version")
             if plan_data.get("tree") != prefix["tree"] or not re.fullmatch(r"\d+\.\d+\.\d+", str(version)):
                 raise ValueError("release planner returned invalid prefix tree/version")
-            _run([sys.executable, os.path.join(trusted, "scripts/ci/inject_root_version.py"), worktree, version], cwd=trusted)
+            _run([sys.executable, str(implementation_root / "scripts/ci/inject_root_version.py"), worktree, version], cwd=trusted)
             env = os.environ.copy()
             env.pop("GITHUB_TOKEN", None)
             env.pop("GH_TOKEN", None)
@@ -279,7 +281,7 @@ def execute(args: argparse.Namespace) -> None:
             prefix_logs = artifacts_dir / f"prefix-{index}-{version}-{prefix['tree'][:12]}-logs"
             gates_file = evidence_dir / f".prefix-{index}-gates.json"
             gates_file.write_text(json.dumps(gates), encoding="utf-8")
-            runner = os.path.join(trusted, "scripts/ci/prefix_runner.py")
+            runner = str(implementation_root / "scripts/ci/prefix_runner.py")
             run_cmd = [python, runner, "--root", worktree, "--target", target,
                        "--cargo", cargo, "--python", python, "--gates", str(gates_file),
                        "--logs", str(prefix_logs)]

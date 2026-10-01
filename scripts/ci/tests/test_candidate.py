@@ -174,6 +174,7 @@ class CandidateTests(unittest.TestCase):
         shutil = __import__("shutil")
         shutil.copy(ROOT / "scripts/ci/candidate.py", repo / "scripts/ci/candidate.py")
         shutil.copy(ROOT / "scripts/ci/inject_root_version.py", repo / "scripts/ci/inject_root_version.py")
+        shutil.copy(ROOT / "scripts/ci/prefix_runner.py", repo / "scripts/ci/prefix_runner.py")
         shutil.copy(ROOT / "ci/capabilities.toml", repo / "ci/capabilities.toml")
         (repo / "scripts/release.py").write_text('''import json, subprocess, sys
 commit = sys.argv[sys.argv.index("--commit") + 1]
@@ -216,15 +217,18 @@ class PrefixBOnly(unittest.TestCase):
         trusted = root / "trusted"
         (trusted / "scripts/ci").mkdir(parents=True)
         (trusted / "ci").mkdir()
-        shutil.copy(ROOT / "scripts/ci/inject_root_version.py", trusted / "scripts/ci/inject_root_version.py")
-        shutil.copy(ROOT / "scripts/ci/prefix_runner.py", trusted / "scripts/ci/prefix_runner.py")
         shutil.copy(ROOT / "ci/capabilities.toml", trusted / "ci/capabilities.toml")
         shutil.copy(ROOT / "justfile", trusted / "justfile")
         (trusted / "scripts/dev").mkdir(parents=True)
         shutil.copy(ROOT / "scripts/dev/lib.sh", trusted / "scripts/dev/lib.sh")
         (trusted / "release-policy.toml").write_text("fixture policy\n")
+        self.assertFalse((trusted / "scripts/ci/inject_root_version.py").exists())
+        self.assertFalse((trusted / "scripts/ci/prefix_runner.py").exists())
         (trusted / "scripts/release.py").write_text('''import json, subprocess, sys
 root = sys.argv[sys.argv.index("--root") + 1]
+policy = sys.argv[sys.argv.index("--policy") + 1]
+assert policy == __file__.replace("scripts/release.py", "release-policy.toml")
+assert open(policy).read() == "fixture policy\\n"
 commit = sys.argv[sys.argv.index("--commit") + 1]
 tree = subprocess.check_output(["git", "-C", root, "rev-parse", commit + "^{tree}"], text=True).strip()
 files = subprocess.check_output(["git", "-C", root, "ls-tree", "-r", "--name-only", commit, "--", ".changes"], text=True).splitlines()
