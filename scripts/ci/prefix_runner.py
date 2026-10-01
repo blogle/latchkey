@@ -81,8 +81,11 @@ def run_prefix(root: Path, target: Path, cargo: str, python: str,
     env = os.environ.copy()
     for name in ("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_READ_TOKEN"):
         env.pop(name, None)
-    env.update({"CARGO_TARGET_DIR": str(target), "CARGO_NET_OFFLINE": "true",
-                "CARGO_PROFILE": "ci", "LATCHKEY_PROFILE": "ci", "LK_ROOT": str(root)})
+    # The shared target is seeded from Crane vendor sources, not a Cargo
+    # registry index. Resolve from the network under the committed lockfile.
+    env.pop("CARGO_NET_OFFLINE", None)
+    env.update({"CARGO_TARGET_DIR": str(target), "CARGO_PROFILE": "ci",
+                "LATCHKEY_PROFILE": "ci", "LK_ROOT": str(root)})
     outcomes: dict[str, bool] = {}
     results = []
     for gate in gates:

@@ -274,8 +274,10 @@ def execute(args: argparse.Namespace) -> None:
             env.pop("GITHUB_TOKEN", None)
             env.pop("GH_TOKEN", None)
             env.pop("GITHUB_READ_TOKEN", None)
+            # Registry availability is not part of the Crane-seeded target
+            # cache. Let Cargo fetch the exact locked dependencies instead.
+            env.pop("CARGO_NET_OFFLINE", None)
             env["CARGO_TARGET_DIR"] = target
-            env["CARGO_NET_OFFLINE"] = "true"
             env["CARGO_PROFILE"] = profile
             env["LATCHKEY_PROFILE"] = profile
             prefix_logs = artifacts_dir / f"prefix-{index}-{version}-{prefix['tree'][:12]}-logs"

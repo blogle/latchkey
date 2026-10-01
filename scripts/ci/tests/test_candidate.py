@@ -247,6 +247,10 @@ print(json.dumps({"tree": tree, "version": f"9.8.{len(files)}"}))
 import os, pathlib, re
 import sys
 args = sys.argv[1:]
+if os.environ.get("CARGO_NET_OFFLINE"):
+    raise SystemExit("candidate must not force Cargo offline mode")
+if args[0] in {"clippy", "test", "build"} and "--locked" not in args:
+    raise SystemExit("dependency-resolving Cargo command must use the committed lockfile (--locked)")
 if os.environ.get("FAIL_GATE") == args[0]: raise SystemExit(1)
 if args[0] == "test":
     print("running 1 test")
@@ -288,6 +292,7 @@ binary.chmod(0o755)
         env = os.environ.copy()
         env.update({"PATH": f"{tools}:{env['PATH']}", "GITHUB_RUN_ID":"42",
                     "GITHUB_TOKEN":"must-not-leak", "GH_TOKEN":"also-must-not-leak",
+                     "CARGO_NET_OFFLINE":"true",
                      "CANDIDATE_TEST_SUITES": '["just candidate-override"]',
                      "TOKEN_MARKER":str(root / "token-marker"), "FAKE_CARGO":str(cargo)})
         command = [sys.executable, str(repo / "scripts/ci/candidate.py"), "run", "--repository", str(repo),
