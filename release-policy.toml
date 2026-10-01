@@ -1,4 +1,4 @@
-# Latchkey release policy (LATCH-4, F05).
+# Latchkey release policy (LATCH-4, F05; bootstrap exception recorded by LATCH-31).
 #
 # Release metadata is a pure function of committed history: scripts/release.py
 # derives every version by folding the FIRST-PARENT chain from --commit down to
@@ -11,3 +11,10 @@
 anchor = "52623fd4c3622288ee0b939e547c6f07e03423e5"
 # Version of the anchor itself; each chained squash commit bumps from here.
 starting_version = "0.0.0"
+# The only non-releasable pre-policy baseline commits. Exact immutable SHAs,
+# in first-parent order; no subject/date/author-based exemption is permitted.
+non_releasable_bootstrap = [
+  "a014e4e338842fac9927ce1a007c5581b0605ae2",
+  "8c997bc05ad1caffdd2e6a6688826649d230432d",
+  "846e01f0f90962bd67c5a4fe8c4935f9a8b9f173",
+]

@@ -1,0 +1,4 @@
+# Changelog fragment for LATCH-31 (release-policy bootstrap baseline).
+category = "Changed"
+summary = "Grandfather the exact pre-policy bootstrap commits without changing release versions"
+bump = "patch"

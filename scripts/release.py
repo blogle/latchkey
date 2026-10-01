@@ -60,6 +60,11 @@ FRAGMENT_FILENAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*-[0-9]+\.toml$")
 # every other file under .changes/ — e.g. this README — is out of contract).
 FRAGMENT_DIFF_RE = re.compile(r"^\.changes/[^/]+\.toml$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+BOOTSTRAP_COMMITS: tuple[str, ...] = (
+    "a014e4e338842fac9927ce1a007c5581b0605ae2",
+    "8c997bc05ad1caffdd2e6a6688826649d230432d",
+    "846e01f0f90962bd67c5a4fe8c4935f9a8b9f173",
+)
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
@@ -94,6 +99,7 @@ class ReleaseError(Exception):
 class Policy:
     anchor: str
     starting_version: str
+    non_releasable_bootstrap: tuple[str, ...] = ()
 
 
 def load_policy(path: Path) -> Policy:
@@ -108,12 +114,13 @@ def load_policy(path: Path) -> Policy:
             "release policy: expected exactly one top-level table [history]"
         )
     history = data["history"]
-    if not isinstance(history, dict) or set(history) != {
-        "anchor",
-        "starting_version",
-    }:
+    if not isinstance(history, dict) or set(history) not in (
+        {"anchor", "starting_version"},
+        {"anchor", "starting_version", "non_releasable_bootstrap"},
+    ):
         raise ReleaseError(
-            "release policy: [history] must define exactly 'anchor' and 'starting_version'"
+            "release policy: [history] must define exactly 'anchor', "
+            "'starting_version', and optional 'non_releasable_bootstrap'"
         )
     anchor = history["anchor"]
     starting = history["starting_version"]
@@ -125,7 +132,21 @@ def load_policy(path: Path) -> Policy:
         raise ReleaseError(
             "release policy: 'starting_version' must be MAJOR.MINOR.PATCH"
         )
-    return Policy(anchor=anchor, starting_version=starting)
+    bootstrap = history.get("non_releasable_bootstrap", [])
+    if (
+        not isinstance(bootstrap, list)
+        or not all(isinstance(sha, str) and SHA_RE.fullmatch(sha) for sha in bootstrap)
+        or (bootstrap and tuple(bootstrap) != BOOTSTRAP_COMMITS)
+    ):
+        raise ReleaseError(
+            "release policy: 'non_releasable_bootstrap' must contain exactly the "
+            "three configured full immutable SHAs in first-parent order"
+        )
+    return Policy(
+        anchor=anchor,
+        starting_version=starting,
+        non_releasable_bootstrap=tuple(bootstrap),
+    )
 
 
 # ---- versions ---------------------------------------------------------------
@@ -464,7 +485,7 @@ def render_notes(version: str, fragments: Sequence[Fragment]) -> str:
 
 
 def fold_chain(
-    root: Path, anchor: str, chain: Sequence[str], starting_version: str
+    root: Path, policy: Policy, chain: Sequence[str]
 ) -> list[CommitPlan]:
     """Fold every chained commit into its plan (oldest-first).
 
@@ -475,13 +496,37 @@ def fold_chain(
     4. issue id not already used (case-insensitive reuse rejected).
     """
     seen_ids: set[str] = set()
-    for path in tree_fragments(root, anchor):
-        seen_ids.add(load_commit_fragment(root, anchor, path).issue.casefold())
+    bootstrap_set = set(BOOTSTRAP_COMMITS)
+    configured = set()
+    # The optional empty list preserves isolated synthetic-history policies.
+    # A real configured history may only omit future baseline commits when the
+    # requested target itself is still before them. Once any releaseable
+    # fragment is present, the complete fixed baseline must be in the chain.
+    if any(fragment_diff(root, policy.anchor, commit)[0] for commit in chain):
+        # Check membership/order against the actual first-parent chain before
+        # folding. This fails closed if an expected pre-policy commit vanished.
+        positions = [chain.index(sha) for sha in policy.non_releasable_bootstrap if sha in chain]
+        if policy.non_releasable_bootstrap and (
+            len(positions) != len(policy.non_releasable_bootstrap)
+            or positions != sorted(positions)
+        ):
+            missing = [sha for sha in policy.non_releasable_bootstrap if sha not in chain]
+            raise ReleaseError(
+                "configured non-releasable bootstrap commit(s) missing from "
+                "anchored first-parent history: " + ", ".join(missing)
+            )
+    configured.update(policy.non_releasable_bootstrap)
+    if configured and configured != bootstrap_set:
+        raise ReleaseError("release policy bootstrap commit list does not match fixed policy")
+    for path in tree_fragments(root, policy.anchor):
+        seen_ids.add(load_commit_fragment(root, policy.anchor, path).issue.casefold())
 
-    version = parse_version(starting_version)
+    version = parse_version(policy.starting_version)
     plans: list[CommitPlan] = []
     for index, commit in enumerate(chain):
-        parent = chain[index - 1] if index > 0 else anchor
+        parent = chain[index - 1] if index > 0 else policy.anchor
+        if commit in configured:
+            continue
         added, changed = fragment_diff(root, parent, commit)
         if changed:
             raise ReleaseError(
@@ -531,7 +576,7 @@ def fold_chain(
 def build_plan(root: Path, policy: Policy, target_spec: str) -> dict:
     target = resolve_commit(root, target_spec)
     chain = first_parent_chain(root, policy.anchor, target)
-    plans = fold_chain(root, policy.anchor, chain, policy.starting_version)
+    plans = fold_chain(root, policy, chain)
 
     if plans:
         target_plan = plans[-1]
@@ -556,6 +601,7 @@ def build_plan(root: Path, policy: Policy, target_spec: str) -> dict:
         "policy": {
             "anchor": policy.anchor,
             "starting_version": policy.starting_version,
+            "non_releasable_bootstrap": list(policy.non_releasable_bootstrap),
         },
         "commit": target_plan.commit,
         "tree": target_plan.tree,
@@ -684,7 +730,7 @@ def cmd_plan(root: Path, policy: Policy, commit: str, as_json: bool) -> int:
 def cmd_changelog(root: Path, policy: Policy, commit: str, output: Path) -> int:
     target = resolve_commit(root, commit)
     chain = first_parent_chain(root, policy.anchor, target)
-    plans = fold_chain(root, policy.anchor, chain, policy.starting_version)
+    plans = fold_chain(root, policy, chain)
     text = render_changelog(target, plans)
 
     resolved = output.resolve()
