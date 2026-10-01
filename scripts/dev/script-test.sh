@@ -30,11 +30,15 @@ fi
 # lists the rule + available suites) without touching the cached environment.
 start_dir=""
 pattern=""
+# Portable test_*.py presence check: `compgen` is unavailable in the cached
+# dev-shell bash (nixpkgs bash-interactive ships without programmable
+# completion), so probe the glob with an array (an unmatched glob stays
+# literal under default options, so -e/-L on the first element is a match test).
+dir_suite_tests=("$LK_ROOT/tests/${suite}"/test_*.py)
 if [[ -f "$LK_ROOT/scripts/dev/tests/test_${suite}.py" ]]; then
   start_dir="$LK_ROOT/scripts/dev/tests"
   pattern="test_${suite}.py"
-elif [[ -d "$LK_ROOT/tests/${suite}" ]] &&
-  compgen -G "$LK_ROOT/tests/${suite}/test_*.py" >/dev/null; then
+elif [[ -d "$LK_ROOT/tests/${suite}" && ( -e "${dir_suite_tests[0]}" || -L "${dir_suite_tests[0]}" ) ]]; then
   start_dir="$LK_ROOT/tests/${suite}"
   pattern="test_*.py"
 elif [[ -f "$LK_ROOT/scripts/ci/tests/test_${suite}.py" ]]; then
