@@ -190,15 +190,18 @@ jobs:
           source candidate/.dev/env
           candidate_script="$GITHUB_WORKSPACE/scripts/ci/candidate.py"
           if [[ ! -f "$candidate_script" ]]; then candidate_script="$GITHUB_WORKSPACE/candidate/scripts/ci/candidate.py"; fi
-          "$LATCHKEY_PYTHON3" "$candidate_script" run --trusted "$GITHUB_WORKSPACE" --repository "$GITHUB_WORKSPACE/candidate" --source "$GITHUB_WORKSPACE/candidate" --batch /tmp/candidate-batch.json --requested-sha "$REQUESTED_SHA"
+          "$LATCHKEY_PYTHON3" "$candidate_script" run --trusted "$GITHUB_WORKSPACE" --repository "$GITHUB_WORKSPACE/candidate" --source "$GITHUB_WORKSPACE/candidate" --batch /tmp/candidate-batch.json --requested-sha "$REQUESTED_SHA" --evidence "$GITHUB_WORKSPACE/candidate/candidate-evidence"
       - name: Read deterministic evidence artifact name
         id: evidence
-        run: echo "artifact_name=$(python3 -c 'import json; print(json.load(open("candidate/candidate-evidence/manifest.json"))["artifact_name"])')" >> "$GITHUB_OUTPUT"
+        run: echo "artifact_name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["artifact_name"])' "$GITHUB_WORKSPACE/candidate/candidate-evidence/manifest.json")" >> "$GITHUB_OUTPUT"
       - name: Upload verified successful candidate evidence
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.evidence.outputs.artifact_name }}
-          path: candidate/candidate-evidence/{manifest.json,SHA256SUMS,artifacts/*}
+          path: |
+            candidate/candidate-evidence/manifest.json
+            candidate/candidate-evidence/SHA256SUMS
+            candidate/candidate-evidence/artifacts/*
           if-no-files-found: error
           retention-days: 90
