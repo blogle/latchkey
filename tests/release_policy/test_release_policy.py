@@ -80,6 +80,16 @@ def policy_text(anchor: str, starting: str = "0.0.0") -> str:
     )
 
 
+def policy_with_bootstrap(anchor: str, bootstrap=None) -> str:
+    values = release.BOOTSTRAP_COMMITS if bootstrap is None else bootstrap
+    return (
+        policy_text(anchor).rstrip()
+        + "\nnon_releasable_bootstrap = [\n"
+        + "".join(f'  "{sha}",\n' for sha in values)
+        + "]\n"
+    )
+
+
 class FixtureRepo:
     """A synthetic git repository in a temp directory."""
 
@@ -590,6 +600,95 @@ class HistoricalRewriteTests(FixtureTestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("is not on the first-parent history", proc.stderr)
         self.assertIn("anchor rewritten", proc.stderr)
+
+
+class BootstrapPolicyTests(FixtureTestCase):
+    def test_policy_requires_the_exact_ordered_full_sha_list(self):
+        with tempfile.TemporaryDirectory(prefix="latchkey-policy-") as tmp:
+            path = Path(tmp) / "policy.toml"
+            path.write_text(
+                policy_with_bootstrap(self.repo.anchor, reversed(release.BOOTSTRAP_COMMITS)),
+                encoding="utf-8",
+            )
+            with self.assertRaises(release.ReleaseError) as ctx:
+                release.load_policy(path)
+            self.assertIn("exactly the three configured full immutable SHAs", str(ctx.exception))
+
+            path.write_text(
+                policy_with_bootstrap(self.repo.anchor, ["a014e4e"]),
+                encoding="utf-8",
+            )
+            with self.assertRaises(release.ReleaseError):
+                release.load_policy(path)
+
+    def test_missing_configured_bootstrap_history_fails_closed(self):
+        self.repo.write(
+            "release-policy.toml", policy_with_bootstrap(self.repo.anchor)
+        )
+        commit = self.repo.commit(
+            "feat: after configured baseline",
+            {".changes/TCK-1.toml": fragment_text()},
+        )
+        proc = self.repo.run("plan", "--commit", commit, "--json")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("configured non-releasable bootstrap commit(s) missing", proc.stderr)
+
+
+class ActualRepositoryHistoryTests(unittest.TestCase):
+    def test_real_repository_plan_maps_release_fragments_and_skips_baseline(self):
+        before = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        master = subprocess.run(
+            ["git", "rev-parse", "--verify", "origin/master^{commit}"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        latch_31_in_master = subprocess.run(
+            ["git", "cat-file", "-e", f"{master}:.changes/LATCH-31.toml"],
+            cwd=REPO, capture_output=True,
+        ).returncode == 0
+        proc = subprocess.run(
+            [sys.executable, str(RELEASE_PY), "plan", "--commit", master, "--json"],
+            cwd=REPO, capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        document = json.loads(proc.stdout)
+        entries = document["unreleased_ancestors"] + [document]
+        release_entries = [entry for entry in entries if entry["fragment"] is not None]
+        expected_releases = [
+            ("LATCH-1", "0.0.1"),
+            ("LATCH-3", "0.0.2"),
+            ("LATCH-2", "0.0.3"),
+            ("LATCH-4", "0.0.4"),
+        ]
+        if latch_31_in_master:
+            expected_releases.append(("LATCH-31", "0.0.5"))
+        self.assertEqual(
+            [(entry["fragment"]["issue"], entry["version"]) for entry in release_entries],
+            expected_releases,
+        )
+        self.assertFalse(
+            set(release.BOOTSTRAP_COMMITS).intersection(entry["commit"] for entry in entries)
+        )
+        after = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertEqual(after, before, "plan must not mutate tracked or untracked state")
+
+    def test_grandfathered_commits_are_exact_and_other_fragmentless_commits_fail(self):
+        self.assertEqual(len(set(release.BOOTSTRAP_COMMITS)), 3)
+        self.assertTrue(all(release.SHA_RE.fullmatch(sha) for sha in release.BOOTSTRAP_COMMITS))
+        # The actual plan proves these exact baseline commits are skipped; this
+        # fixture proves that merely being fragmentless never grants an exemption.
+        repo = make_repo()
+        self.addCleanup(repo.cleanup)
+        repo.write("release-policy.toml", policy_with_bootstrap(repo.anchor))
+        commit = repo.commit("chore: unrelated fragmentless", {"README.md": "changed\n"})
+        proc = repo.run("plan", "--commit", commit, "--json")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("introduces no changelog fragment", proc.stderr)
 
 
 class MergeCommitTests(FixtureTestCase):
