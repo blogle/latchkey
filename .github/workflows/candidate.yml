@@ -1,0 +1,64 @@
+name: Merge candidate
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      requested_sha:
+        description: Exact candidate commit SHA to validate
+        required: true
+        type: string
+      ordered_heads:
+        description: JSON array of ordered PR head SHAs (maximum 3)
+        required: true
+        type: string
+      base_sha:
+        description: Exact target base SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-${{ github.event.pull_request.head.sha || inputs.requested_sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  candidate-ready:
+    name: candidate-ready
+    if: >-
+      (github.event_name == 'pull_request' && startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/')) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
+          fetch-depth: 0
+      - name: Verify trusted event and exact requested SHA
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
+          TRUSTED_DISPATCH_ACTORS: ${{ vars.LATCHKEY_CI_TRUSTED_DISPATCH_ACTORS }}
+        run: python3 scripts/ci/validate_candidate_event.py
+      - uses: DeterminateSystems/nix-installer-action@v23
+        with:
+          extra_nix_config: |
+            substituters = https://cache.nixos.org/ https://nix-community.cachix.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
+      - name: Bootstrap cached toolchain
+        run: nix run .#bootstrap
+      - name: Require F05 release plan for requested revision
+        env:
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
+        run: python3 scripts/release.py plan --commit "$REQUESTED_SHA" --json > candidate-release-plan.json
+      - name: candidate-check
+        run: nix develop -c just candidate-check

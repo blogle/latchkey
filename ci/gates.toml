@@ -1,0 +1,28 @@
+# F04 candidate validation policy. Capabilities remain authoritative for the
+# cumulative active suite list; this file adds candidate/prefix invariants.
+schema_version = 1
+max_batch_size = 3
+capabilities_file = "ci/capabilities.toml"
+release_planner = "scripts/release.py"
+candidate_check = "just candidate-check"
+cache_dimensions = ["content_tree", "cargo_lock", "toolchain", "features", "profile", "release_version"]
+include_git_commit_metadata_in_content_derivation = false
+reuse_dependency_setup_within_batch = true
+require_all_prefixes = true
+require_final_tree_match = true
+fail_on_missing_batch_metadata = true
+artifact_checksums = "sha256"
+artifact_download = "immutable run-id and artifact-id"
+provenance_separate_from_content_derivation = true
+
+[[stages]]
+id = "foundation"
+active_suites = ["bootstrap-binary"]
+
+[[stages]]
+id = "standalone"
+active_suites = ["bootstrap-binary", "standalone-e2e", "protocol-compatibility", "concurrency"]
+
+[[stages]]
+id = "kubernetes"
+active_suites = ["bootstrap-binary", "standalone-e2e", "protocol-compatibility", "concurrency", "kubernetes-integration"]

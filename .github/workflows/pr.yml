@@ -1,0 +1,51 @@
+name: PR fast checks
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-fast-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-fast:
+    name: pr-fast
+    if: ${{ !startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: DeterminateSystems/nix-installer-action@v23
+        with:
+          extra_nix_config: |
+            substituters = https://cache.nixos.org/ https://nix-community.cachix.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
+      - name: Validate PR provenance and source revision
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/ci/validate_pr.py
+      - name: Bootstrap cached toolchain
+        run: nix run .#bootstrap
+      - name: Validate merge base and fragment
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin master
+          base="$(git merge-base origin/master HEAD)"
+          if [[ -n "$(git rev-list --merges "$base"..HEAD)" ]]; then
+            echo 'PR branch contains merge commits since merge base' >&2
+            exit 1
+          fi
+          python3 scripts/release.py validate-fragment --base "$base"
+      - name: pr-check
+        run: nix develop -c just pr-check
