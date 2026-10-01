@@ -49,17 +49,34 @@ re-enforces the same invariants per traversed commit.
 [history]
 anchor = "52623fd4c3622288ee0b939e547c6f07e03423e5"
 starting_version = "0.0.0"
+non_releasable_bootstrap = [
+  "a014e4e338842fac9927ce1a007c5581b0605ae2",
+  "8c997bc05ad1caffdd2e6a6688826649d230432d",
+  "846e01f0f90962bd67c5a4fe8c4935f9a8b9f173",
+]
 ```
+
+**Fixed implementation decision (LATCH-31; the sole exception):** the three
+full commit IDs listed above are grandfathered pre-policy bootstrap entries.
+They produce no release, no version increment, and need no fragments. The
+list is a fixed, ordered set of immutable full SHAs validated by the planner;
+when planning into the fragment-bearing release history, every configured
+SHA must occur in the anchored first-parent chain. Only these exact commits
+are skipped. No subject, author, branch, date, or general fragmentless-commit
+rule grants an exemption. This is an implementation decision, not a change to
+the original anchor (`52623fd4c3622288ee0b939e547c6f07e03423e5`) or starting
+version (`0.0.0`).
 
 - The version is derived from **committed history, never from the mutable
   latest tag**: walk the **first-parent** chain from `--commit` back to the
   anchor (oldest first), starting at `starting_version`, and fold each squash
   commit.
-- Every chained commit must introduce **exactly one new** `.changes/*.toml`
-  (relative to its first parent) and may not modify or delete any fragment
-  that already exists. Each commit bumps patch unless its fragment explicitly
-  requests `minor` or `major`. N squash commits therefore yield N versions,
-  each prefix folded independently.
+- Every non-grandfathered chained commit must introduce **exactly one new**
+  `.changes/*.toml` (relative to its first parent) and may not modify or delete
+  any fragment that already exists. Each such commit bumps patch unless its
+  fragment explicitly requests `minor` or `major`. Grandfathered commits above
+  do not create plan entries or affect versions. Each releaseable squash
+  commit therefore yields one version, each prefix folded independently.
 - The anchor itself may be planned: it yields `starting_version` with empty
   notes and no ancestors.
 
@@ -71,10 +88,13 @@ in oldest-first order):
 2. **Merge commits** anywhere on the chain (release history is linear
    squash merges; side-branch commits are never traversed unless you plan a
    commit whose own first-parent chain contains them).
-3. Per commit: modified/deleted fragment (**immutability**), then zero
+3. When planning across the grandfathered baseline, a configured exact SHA
+   missing from the anchored first-parent chain is a closed failure.
+4. Per non-grandfathered commit: modified/deleted fragment (**immutability**), then zero
    fragments (**missing**) or 2+ (**ambiguous**), then schema/filename/secret
    violations, then an issue id already used earlier in the traversal
-   (**reuse**, case-insensitive).
+   (**reuse**, case-insensitive). Grandfathering is tested by exact full SHA
+   equality only.
 
 The policy file itself is configuration read from the checkout
 (`<root>/release-policy.toml`, override with `--policy PATH`); everything
@@ -196,11 +216,8 @@ and exercises the real CLI end to end. The suite discovery rule is generic
 
 ## Known state of this repository's history
 
-The three commits after the anchor that predate the fragment contract —
-`a014e4e` (owner queue activation), `8c997bc` (config syntax fix) and
-`846e01f` (Mergify bot config upgrade) — carry no fragment. Planning any
-commit after `a014e4e` with the default policy therefore **rejects at
-`a014e4e`**, the first fragmentless commit, by design: there is no exemption
-or bypass. The fragment-bearing suffix (everything after `846e01f`) plans
-normally when the policy anchors there; see `.changes/README.md` and the
-LATCH-4 evidence for recorded outputs.
+The three pre-policy commits immediately after the anchor are the exact
+grandfathered entries documented above. The fragment-bearing suffix is mapped
+from the unchanged 0.0.0 starting version: LATCH-1=0.0.1, LATCH-3=0.0.2,
+LATCH-2=0.0.3, LATCH-4=0.0.4. Subsequent releaseable commits continue that
+history; any other fragmentless commit remains a hard planning error.
