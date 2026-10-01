@@ -3,10 +3,10 @@
 ## Ordinary pull requests
 
 `.github/workflows/pr.yml` accepts only same-repository pull requests to
-`master`. It checks out the PR base first and runs `validate_pr.py --event-only`
-from that trusted revision before checking out the requested head into a
-separate directory (with persisted checkout credentials disabled). It
-validates exact same-repository head SHA, rejects merge commits since merge
+`master`. It checks out the PR base first and uses a small inline event
+validator to check the same-repository source, `master` target, and exact
+requested head SHA before checking out that head into a separate directory
+(with persisted checkout credentials disabled). It rejects merge commits since merge
 base, and runs the trusted F05 fragment validator with `--root` pointing at the
 candidate checkout. After setting up the candidate's cached environment, the
 trusted justfile and cached just tool run `pr-check` and the integration
@@ -17,29 +17,38 @@ this workflow.
 ## Candidate metadata and trust boundary
 
 `.github/workflows/candidate.yml` exposes `candidate-ready`. It accepts a
-Mergify queue PR only after trusted-base event validation confirms the bot,
-queue ref, master target and exact event SHA; manual dispatch is restricted to
-the configured trusted actor on `master`. The trusted-base copy executes all
-event and metadata validation before candidate source is checked out.
+Mergify queue PR only after inline event validation confirms the bot, queue
+ref, master target, same repository and exact event SHA; manual dispatch is
+restricted to the configured trusted actor on `master` and validates the exact
+input batch before candidate source is checked out. This inline validator is
+self-contained because F04 validator scripts do not exist in the base on the
+first workflow run.
 
-For queue runs, the workflow consumes the official `mergify ci queue-info`
-output. Its ordered `pull_requests` and `checking_base_sha` determine queue
+For queue runs, after exact SHA checkout and verification, the workflow runs
+the official `mergify ci queue-info` from inside the candidate checkout. Its
+ordered `pull_requests` and `checking_base_sha` determine queue
 order/base; a separate read-only GitHub PR API call resolves each exact PR
 number to its API `head.sha` and `base.sha`. The requested candidate tree is
 resolved from the exact event commit. Dispatch supplies one explicit JSON
 `batch_json` containing `base_sha`, `requested_tree`, and ordered
 `pull_requests` records `{number, head_sha, base_sha}`; it does not infer order
 or make unused inputs. Both paths validate and serialize the identical
-`latchkey-candidate-batch/v1` schema. API credentials are present only during
-trusted metadata resolution; candidate Python and Cargo receive none.
+`latchkey-candidate-batch/v1` schema. `Mergifyio/setup-cli@v1.3.0` is a
+published official action ref. API credentials are present only for queue-info
+and metadata resolution; those steps receive the read-only `GH_TOKEN` only as
+needed. The resolver alone makes authenticated API lookups. Candidate
+orchestration, build, and test steps receive no token.
 
 ## Prefix execution and evidence
 
-The trusted base checkout supplies the event/batch validators, candidate
-orchestrator, cache-key code, F05 planner, root-version injector, and capability
-policy. The candidate checkout is only the Git object/source input and has
-`persist-credentials: false`. GitHub credentials exist only in trusted
-metadata-resolution steps. Candidate build/test subprocesses explicitly drop
+The base checkout supplies trusted tools when present, including the F05
+planner, root-version injector, and capability policy. On the first F04 queue
+run, the base lacks the F04 resolver and candidate orchestrator, so after
+inline validation and exact SHA verification those scripts may bootstrap from
+the candidate tree. They run without write/publication credentials; the
+resolver alone may receive the read-only API token for its API lookups. The
+candidate checkout has
+`persist-credentials: false`. Candidate build/test subprocesses explicitly drop
 `GITHUB_TOKEN`, `GH_TOKEN`, and `GITHUB_READ_TOKEN`.
 
 `candidate.py run` independently reconstructs each ordered base-to-head patch

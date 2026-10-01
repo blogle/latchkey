@@ -24,12 +24,29 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Validate PR provenance from trusted base
+      - name: Validate PR provenance inline before candidate checkout
         env:
           GITHUB_EVENT_PATH: ${{ github.event_path }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           REQUESTED_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python3 scripts/ci/validate_pr.py --event-only
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+
+          event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+          pr = event.get("pull_request", {})
+          repository = os.environ["GITHUB_REPOSITORY"]
+          requested = os.environ["REQUESTED_SHA"]
+          if event.get("repository", {}).get("full_name") != repository:
+              raise SystemExit("event repository does not match workflow repository")
+          if pr.get("head", {}).get("repo", {}).get("full_name") != repository:
+              raise SystemExit("only same-repository pull requests are accepted")
+          if pr.get("base", {}).get("ref") != "master":
+              raise SystemExit("pull request target must be master")
+          if not re.fullmatch(r"[0-9a-f]{40}", requested) or pr.get("head", {}).get("sha") != requested:
+              raise SystemExit("pull request head does not match the requested exact SHA")
+          PY
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
