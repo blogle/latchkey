@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -45,6 +46,31 @@ class FakeGh:
 
 
 class RepositoryPolicyTests(unittest.TestCase):
+    def test_mergify_shared_interface_barriers_are_symmetric_and_narrow(self):
+        config = (Path(__file__).resolve().parents[3] / ".mergify.yml").read_text(
+            encoding="utf-8"
+        )
+        positive = re.search(r"^\s*- files ~= (.+)$", config, re.MULTILINE)
+        negative = re.search(r"^\s*- -files ~= (.+)$", config, re.MULTILINE)
+        self.assertIsNotNone(positive)
+        self.assertIsNotNone(negative)
+        self.assertEqual(positive.group(1), negative.group(1))
+        barrier = re.compile(positive.group(1))
+
+        for path in (
+            "release-policy.toml",
+            "docs/contracts.md",
+            ".changes/README.md",
+            "docs/ci.md",
+            "Cargo.lock",
+            ".github/workflows/pr.yml",
+            ".github/workflows/candidate.yml",
+        ):
+            with self.subTest(path=path):
+                self.assertIsNotNone(barrier.search(path))
+
+        self.assertIsNone(barrier.search("docs/architecture.md"))
+
     def test_snapshot_diff_is_deterministic_and_detects_settings(self):
         baseline = initial_snapshot()
         plan = policy.diff(baseline, baseline)

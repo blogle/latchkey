@@ -126,10 +126,13 @@ trusted F05 fragment validation. Queue admission does not wait for
 Mergify queue/draft head whose ordered heads and tree are validated by the
 candidate workflow. Queue refreshes and rechecks after external master updates.
 
-Compatible ordinary changes use a maximum batch of three. Shared interfaces,
-Cargo manifests/lock/toolchain/flake, workflows, `.mergify.yml`, CI capability
-and gate policy, and F05 release policy/planner changes use the single-candidate
-barrier. Both queues rebase updates and squash merges. Mergify's
+Compatible ordinary changes use a maximum batch of three. Shared contracts
+(`docs/contracts.md` and source interfaces), the fragment contract
+(`.changes/README.md`), CI policy (`docs/ci.md`), root release policy and
+planner changes, Cargo manifests/lock/toolchain/flake, workflows,
+`.mergify.yml`, and CI capability and gate policy use the single-candidate
+barrier. Other documentation remains eligible for batching. Both queues rebase
+updates and squash merges. Mergify's
 `branch_protection_injection_mode: merge` leaves the required Mergify Merge Queue
 check out of queue admission, avoiding a queue-entry deadlock. GitHub's native
 merge-queue rule is not enabled. Default squash commit messages include the PR

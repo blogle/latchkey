@@ -33,7 +33,7 @@ pull_request_rules:
   - name: queue shared-interface changes as a single candidate
     conditions:
       - base=master
-      - files ~= ^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|flake\.nix|flake\.lock|\.mergify\.yml|\.github/workflows/|src/(contracts|catalog|router|config|downstream|server|controller|lib)\.rs|crds/|ci/(capabilities|gates|release-policy)\.toml|scripts/(release|ci/(candidate|prefix_runner|resolve_candidate_batch|validate_candidate_event|repository-policy)\.py))
+      - files ~= ^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|flake\.nix|flake\.lock|\.mergify\.yml|\.github/workflows/|\.changes/README\.md|docs/(contracts|ci)\.md|release-policy\.toml|src/(contracts|catalog|router|config|downstream|server|controller|lib)\.rs|crds/|ci/(capabilities|gates|release-policy)\.toml|scripts/(release|ci/(candidate|prefix_runner|resolve_candidate_batch|validate_candidate_event|repository-policy)\.py))
     actions:
       queue:
         name: barrier
@@ -41,7 +41,7 @@ pull_request_rules:
   - name: queue ordinary compatible changes
     conditions:
       - base=master
-      - -files ~= ^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|flake\.nix|flake\.lock|\.mergify\.yml|\.github/workflows/|src/(contracts|catalog|router|config|downstream|server|controller|lib)\.rs|crds/|ci/(capabilities|gates|release-policy)\.toml|scripts/(release|ci/(candidate|prefix_runner|resolve_candidate_batch|validate_candidate_event|repository-policy)\.py))
+      - -files ~= ^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|flake\.nix|flake\.lock|\.mergify\.yml|\.github/workflows/|\.changes/README\.md|docs/(contracts|ci)\.md|release-policy\.toml|src/(contracts|catalog|router|config|downstream|server|controller|lib)\.rs|crds/|ci/(capabilities|gates|release-policy)\.toml|scripts/(release|ci/(candidate|prefix_runner|resolve_candidate_batch|validate_candidate_event|repository-policy)\.py))
     actions:
       queue:
         name: default
