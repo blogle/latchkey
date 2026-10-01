@@ -1,0 +1,20 @@
+# Minimal bootstrap merge queue for the Latchkey MVP foundation lane.
+# One-time owner activation for LATCH-1 (F01); F06 (LATCH-6) expands this
+# into the full rebasing, protected linear-master configuration.
+queue_rules:
+  - name: bootstrap
+    merge_method: squash
+    update_method: rebase
+    strict: true
+    conditions:
+      - check-success=pr-fast
+      - check-success=candidate-ready
+
+pull_request_rules:
+  - name: queue pull requests into the bootstrap queue
+    conditions:
+      - base=master
+      - draft=false
+    actions:
+      queue:
+        name: bootstrap
