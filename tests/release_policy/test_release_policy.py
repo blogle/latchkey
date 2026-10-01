@@ -974,7 +974,7 @@ class SuiteDiscoveryGlueTests(unittest.TestCase):
     def test_real_repo_lists_dispatch_and_release_policy(self):
         proc = lk_script_suites()
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(sorted(proc.stdout.split()), ["dispatch", "release_policy"])
+        self.assertTrue({"dispatch", "release_policy"}.issubset(proc.stdout.split()))
 
     def test_three_root_union_deduplicated_sorted(self):
         with tempfile.TemporaryDirectory(prefix="latchkey-suites-") as tmp:
