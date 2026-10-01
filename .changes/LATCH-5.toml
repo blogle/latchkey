@@ -1,0 +1,4 @@
+# Changelog fragment for LATCH-5 (independent; no shared changelog files).
+category = "Added"
+summary = "Add two-stage pull request and merge-candidate CI foundations"
+bump = "patch"
