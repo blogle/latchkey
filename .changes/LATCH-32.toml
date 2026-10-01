@@ -1,0 +1,4 @@
+# Changelog fragment for LATCH-32 (post-merge release and candidate validation fixes).
+category = "Changed"
+summary = "Keep release-history and trusted candidate validation checks current after merges"
+bump = "patch"

@@ -644,10 +644,11 @@ class ActualRepositoryHistoryTests(unittest.TestCase):
             ["git", "rev-parse", "--verify", "origin/master^{commit}"], cwd=REPO,
             capture_output=True, text=True, check=True,
         ).stdout.strip()
-        latch_31_in_master = subprocess.run(
-            ["git", "cat-file", "-e", f"{master}:.changes/LATCH-31.toml"],
-            cwd=REPO, capture_output=True,
-        ).returncode == 0
+        fragments_in_master = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", master, "--", ".changes"],
+            cwd=REPO, capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+        issues_in_master = {Path(path).stem for path in fragments_in_master}
         proc = subprocess.run(
             [sys.executable, str(RELEASE_PY), "plan", "--commit", master, "--json"],
             cwd=REPO, capture_output=True, text=True,
@@ -656,17 +657,30 @@ class ActualRepositoryHistoryTests(unittest.TestCase):
         document = json.loads(proc.stdout)
         entries = document["unreleased_ancestors"] + [document]
         release_entries = [entry for entry in entries if entry["fragment"] is not None]
-        expected_releases = [
-            ("LATCH-1", "0.0.1"),
-            ("LATCH-3", "0.0.2"),
-            ("LATCH-2", "0.0.3"),
-            ("LATCH-4", "0.0.4"),
-        ]
-        if latch_31_in_master:
-            expected_releases.append(("LATCH-31", "0.0.5"))
+        releases_by_issue = {
+            entry["fragment"]["issue"]: entry["version"] for entry in release_entries
+        }
         self.assertEqual(
-            [(entry["fragment"]["issue"], entry["version"]) for entry in release_entries],
-            expected_releases,
+            {issue: releases_by_issue.get(issue) for issue in (
+                "LATCH-1", "LATCH-3", "LATCH-2", "LATCH-4", "LATCH-31"
+            )},
+            {
+                "LATCH-1": "0.0.1",
+                "LATCH-3": "0.0.2",
+                "LATCH-2": "0.0.3",
+                "LATCH-4": "0.0.4",
+                "LATCH-31": "0.0.5",
+            },
+        )
+        if "LATCH-5" in issues_in_master:
+            self.assertEqual(releases_by_issue.get("LATCH-5"), "0.0.6")
+        self.assertTrue(
+            all(isinstance(entry.get("version"), str) and entry["version"] for entry in entries),
+            "every first-parent plan entry must have a version",
+        )
+        self.assertEqual(
+            len(releases_by_issue), len(release_entries),
+            "each fragment-bearing first-parent commit must be represented exactly once",
         )
         self.assertFalse(
             set(release.BOOTSTRAP_COMMITS).intersection(entry["commit"] for entry in entries)
