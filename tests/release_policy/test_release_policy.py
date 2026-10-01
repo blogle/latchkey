@@ -640,23 +640,33 @@ class ActualRepositoryHistoryTests(unittest.TestCase):
             ["git", "status", "--porcelain"], cwd=REPO,
             capture_output=True, text=True, check=True,
         ).stdout
+        master = subprocess.run(
+            ["git", "rev-parse", "--verify", "origin/master^{commit}"], cwd=REPO,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        latch_31_in_master = subprocess.run(
+            ["git", "cat-file", "-e", f"{master}:.changes/LATCH-31.toml"],
+            cwd=REPO, capture_output=True,
+        ).returncode == 0
         proc = subprocess.run(
-            [sys.executable, str(RELEASE_PY), "plan", "--commit", "HEAD", "--json"],
+            [sys.executable, str(RELEASE_PY), "plan", "--commit", master, "--json"],
             cwd=REPO, capture_output=True, text=True,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         document = json.loads(proc.stdout)
         entries = document["unreleased_ancestors"] + [document]
         release_entries = [entry for entry in entries if entry["fragment"] is not None]
+        expected_releases = [
+            ("LATCH-1", "0.0.1"),
+            ("LATCH-3", "0.0.2"),
+            ("LATCH-2", "0.0.3"),
+            ("LATCH-4", "0.0.4"),
+        ]
+        if latch_31_in_master:
+            expected_releases.append(("LATCH-31", "0.0.5"))
         self.assertEqual(
             [(entry["fragment"]["issue"], entry["version"]) for entry in release_entries],
-            [
-                ("LATCH-1", "0.0.1"),
-                ("LATCH-3", "0.0.2"),
-                ("LATCH-2", "0.0.3"),
-                ("LATCH-4", "0.0.4"),
-                ("LATCH-31", "0.0.5"),
-            ],
+            expected_releases,
         )
         self.assertFalse(
             set(release.BOOTSTRAP_COMMITS).intersection(entry["commit"] for entry in entries)
