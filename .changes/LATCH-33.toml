@@ -1,0 +1,3 @@
+category = "Changed"
+summary = "Cache Nix build outputs in CI with Hestia"
+bump = "patch"

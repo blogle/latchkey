@@ -1,0 +1,43 @@
+name: Hestia cache GC
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Plan only; do not delete cache entries.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hestia-gc
+  cancel-in-progress: false
+
+jobs:
+  gc:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@v23
+      - uses: Mic92/hestia@v3
+      - name: Garbage collect unused cache entries
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          if [[ "$DRY_RUN" == true ]]; then
+            "$HESTIA_BIN" gc --dry-run
+          else
+            "$HESTIA_BIN" gc
+          fi

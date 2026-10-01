@@ -18,6 +18,12 @@ fragments; they still run `pr-check` and `contracts` against the combined
 candidate tree. The candidate workflow independently validates each batch
 prefix and remains the final `candidate-ready` gate.
 
+Both build workflows install `Mic92/hestia@v3` after Nix setup. Hestia caches
+Nix build outputs in the GitHub Actions cache, accelerating the pinned
+toolchain and Nix-backed developer environment across runs. The scheduled
+`.github/workflows/hestia-gc.yml` workflow runs Hestia garbage collection on
+`master`; a manual dispatch can perform a dry run.
+
 ## Candidate metadata and trust boundary
 
 `.github/workflows/candidate.yml` exposes `candidate-ready`. It accepts a
