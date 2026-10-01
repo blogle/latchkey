@@ -114,3 +114,37 @@ by latest run, branch name, or a broad cache restore key.
 `ci/gates.toml` records policy; it is not evidence that a successful workflow
 run exists. Candidate readiness must remain a required final merge condition
 only after its workflow is enabled and observed green.
+
+## Mergify merge policy (F06)
+
+Mergify is the only selector, orderer, batcher, and merger for `master`. Both
+queues require the successful `@github-actions/pr-fast` check, a same-repository
+non-draft PR, linear history, no conflict or `blocked`/`blocker`/`hold` label,
+and a title containing a `LATCH-N` issue identifier. `pr-fast` includes the
+trusted F05 fragment validation. Queue admission does not wait for
+`candidate-ready`; that check is required only at final merge, against the exact
+Mergify queue/draft head whose ordered heads and tree are validated by the
+candidate workflow. Queue refreshes and rechecks after external master updates.
+
+Compatible ordinary changes use a maximum batch of three. Shared interfaces,
+Cargo manifests/lock/toolchain/flake, workflows, `.mergify.yml`, CI capability
+and gate policy, and F05 release policy/planner changes use the single-candidate
+barrier. Both queues rebase updates and squash merges. Mergify's
+`branch_protection_injection_mode: merge` leaves the required Mergify Merge Queue
+check out of queue admission, avoiding a queue-entry deadlock. GitHub's native
+merge-queue rule is not enabled. Default squash commit messages include the PR
+title and number; the required `LATCH-N` in the title therefore survives in the
+master commit message. `scripts/ci/repository-policy.py verify-ancestry` checks
+the resulting one-parent first-parent child and commit message after a merge.
+
+The repository policy tool is intentionally separate from configuration. Its
+`snapshot`, `plan`, and `verify` commands are read-only. `apply` requires both
+`--confirm` and repository-admin permission, re-reads and compares the complete
+snapshot before writing, and installs no bypass actors. Do not run `apply` from
+the PR builder: settings are applied after review/merge by the orchestrator.
+The pre-change snapshot recorded in LATCH-6 comment #189 (2026-10-01) showed
+default branch `master`; squash, merge-commit, and rebase merge methods enabled;
+auto-merge disabled; delete-on-merge disabled; no branch protection, rulesets,
+or active master rules. Mergify was installed (GitHub App ID 10562) and the
+authenticated repository account had admin access. The implementation snapshot
+command re-reads this baseline rather than embedding it.
