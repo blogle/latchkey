@@ -1,0 +1,4 @@
+# Changelog fragment for LATCH-3 (independent; no shared changelog files).
+category = "Changed"
+summary = "Rebuild the just workflow into a GC-rooted cached native dev environment with frozen root dispatch and profile-keyed Cargo artifact reuse"
+bump = "patch"
