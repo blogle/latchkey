@@ -1,194 +1,174 @@
-# Latchkey developer workflow (LATCH-1).
+# Latchkey developer workflow (LATCH-1 evolved by LATCH-3).
 #
-# Every Rust invocation is routed through the pinned Nix toolchain
-# (`nix develop -c cargo ...`); `just` itself comes from the locked nixpkgs
-# graph (devShell, or `nix run .#bootstrap` which prepends the locked just).
-# Recipes map to real commands only: anything not defined here fails closed
-# with just's own "justfile does not contain recipe" error.
+# Root command dispatch is FROZEN: exactly the recipes below exist. Recipes
+# are thin argv-preserving front-ends over owned dispatchers in scripts/dev/*
+# and scripts/checks/*; lane/suite selection is parameterized (file names +
+# arguments), never by editing this file. Unimplemented/future commands fail
+# closed naming their owning ticket and can never succeed.
+#
+# Environment model: `just setup` materializes a GC-rooted, fingerprint-keyed
+# dev environment into gitignored .dev/ via `nix print-dev-env` (only when
+# flake.lock + rust-toolchain.toml + Cargo manifests/lock + setup version +
+# checkout path change, or on forced `just setup true`). Every other recipe
+# sources the cached .dev/env and invokes absolute cached tool paths — no
+# nix evaluation happens in fmt/lint/test/build recipes. `just doctor` only
+# diagnoses; it reports `just setup true` as the single forced-refresh
+# command. See docs/development.md.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# List the available recipes.
+# Forward parameters as a safely quoted argv array (shebang recipes receive
+# them positionally; interpolation never re-tokenizes user input).
+set positional-arguments
+
+# List the available recipes (default).
 default:
     @just --list
 
-# Warm the environment and record a toolchain/lock fingerprint in the
-# gitignored .setup-marker. Run once per toolchain or lock change; this is
-# what the nix bootstrap entry invokes.
-setup:
+# Re-materialize .dev/ when the fingerprint changed; `just setup true` forces.
+setup refresh='false':
     #!/usr/bin/env bash
     set -euo pipefail
-    cd "{{justfile_directory()}}"
+    exec "{{justfile_directory()}}/scripts/dev/setup.sh" "$@"
 
-    for f in rust-toolchain.toml flake.lock Cargo.lock; do
-      if [[ ! -f "$f" ]]; then
-        echo "setup: error: missing $f" >&2
-        exit 1
-      fi
-    done
-
-    fingerprint="$(cat rust-toolchain.toml flake.lock Cargo.lock | sha256sum | cut -d' ' -f1)"
-
-    echo "setup: verifying the pinned toolchain (first run builds/warms it)..."
-    toolchain_report="$(nix develop -c bash -c 'rustc --version && cargo --version && cargo fmt --version && cargo clippy --version && just --version')"
-
-    {
-      echo "fingerprint=$fingerprint"
-      echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      printf '%s\n' "$toolchain_report"
-    } > .setup-marker
-
-    echo "setup: recorded .setup-marker (fingerprint=$fingerprint)"
-
-# Verify environment health; fails with guidance when setup is missing or
-# stale (toolchain/lock files changed since `just setup`).
+# Diagnose the cached environment (never rebuilds; reports `just setup true`).
 doctor:
+    "{{justfile_directory()}}/scripts/dev/doctor.sh"
+
+# Format the Rust sources in place (pinned rustfmt).
+fmt:
+    "{{justfile_directory()}}/scripts/dev/cargo.sh" fmt
+
+# Check formatting without writing.
+fmt-check:
+    "{{justfile_directory()}}/scripts/dev/cargo.sh" fmt-check
+
+# Clippy over all targets with warnings denied (`LATCHKEY_PROFILE` overrides).
+lint:
+    "{{justfile_directory()}}/scripts/dev/cargo.sh" lint
+
+# Fast dev-profile build (persistent profile-keyed Cargo target dir).
+build:
+    "{{justfile_directory()}}/scripts/dev/cargo.sh" build
+
+# Lib tests: `just test-unit` (all), `just test-unit <lane>` -> <lane>:: tests.
+test-unit lane='':
     #!/usr/bin/env bash
     set -euo pipefail
-    cd "{{justfile_directory()}}"
+    exec "{{justfile_directory()}}/scripts/dev/cargo.sh" test-unit "$@"
 
-    fail() {
-      echo "doctor: error: $*" >&2
-      echo "doctor: fix: run 'just setup' (or 'nix run .#bootstrap'), once per toolchain/lock change" >&2
-      exit 1
-    }
+# Integration suite: `just test-integration contracts -- --nocapture`.
+test-integration suite *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec "{{justfile_directory()}}/scripts/dev/cargo.sh" test-integration "$@"
 
-    for f in rust-toolchain.toml flake.lock Cargo.lock; do
-      [[ -f "$f" ]] || fail "missing $f"
-    done
+# Python unittest suite for the dispatcher scripts (`just script-test dispatch`).
+script-test suite:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec "{{justfile_directory()}}/scripts/dev/script-test.sh" "$@"
 
-    expected="$(cat rust-toolchain.toml flake.lock Cargo.lock | sha256sum | cut -d' ' -f1)"
-    [[ -f .setup-marker ]] || fail "no .setup-marker: setup has not been run"
+# Fast gate: fmt-check + lint + script-test + test-unit (no OCI/flake/E2E).
+pr-check:
+    "{{justfile_directory()}}/scripts/checks/pr-check.sh"
 
-    recorded="$(sed -n 's/^fingerprint=//p' .setup-marker)"
-    [[ -n "$recorded" ]] || fail ".setup-marker is malformed (no fingerprint line)"
-    if [[ "$recorded" != "$expected" ]]; then
-      echo "doctor: recorded fingerprint: $recorded" >&2
-      echo "doctor: current fingerprint:  $expected" >&2
-      fail "setup marker is stale: rust-toolchain.toml/flake.lock/Cargo.lock changed since setup"
-    fi
-
-    nix develop -c bash -c 'rustc --version && cargo --version' >/dev/null \
-      || fail "the pinned toolchain is not usable via 'nix develop'"
-
-    echo "doctor: environment healthy (fingerprint=$recorded)"
-    sed 's/^/doctor:   /' .setup-marker
-
-# Check formatting with the pinned rustfmt.
-fmt-check:
-    nix develop -c cargo fmt --all -- --check
-
-# Run clippy with warnings denied (dev profile).
-lint:
-    nix develop -c cargo clippy --all-targets --locked -- -D warnings
-
-# Run the unit tests (dev/test profile; tests always unwind).
-test-unit:
-    nix develop -c cargo test --all-targets --locked
-
-# Fast local development build (dev profile).
-build:
-    nix develop -c cargo build --locked
+# Full gate: pr-check + nix flake check + package/OCI builds + smoke (ci profile).
+candidate-check:
+    "{{justfile_directory()}}/scripts/checks/candidate-check.sh"
 
 # Build the OCI image (static musl binary + CA roots).
 image:
     nix build .#oci --out-link result-oci
 
-# Cheap pull-request gate: formatting, lints, and unit tests.
-pr-check: fmt-check lint test-unit
-
-# Full merge-candidate gate: everything pr-check runs, plus flake checks,
-# package + image builds, and native/OCI smoke tests.
-candidate-check: fmt-check lint test-unit
+# Benchmarks: not built yet (owning ticket below).
+bench suite:
     #!/usr/bin/env bash
     set -euo pipefail
-    cd "{{justfile_directory()}}"
+    exec "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-8 bench "$@"
 
-    fail() { echo "candidate-check: error: $*" >&2; exit 1; }
+# Dev-cluster helpers: not built yet (owning ticket below).
+dev:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-20 dev
 
-    echo "==> nix flake check"
-    nix flake check
+# Reload dev-cluster helpers: not built yet (owning ticket below).
+dev-reload:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-20 dev-reload
 
-    echo "==> nix build .#package .#oci"
-    # nix names multi-installable out-links: result (first) and result-1
-    # (second), in argument order.
-    nix build .#package .#oci
-    if [[ ! -e result || ! -e result-1 ]]; then
-      fail "expected nix to produce result (package) and result-1 (image) out-links"
-    fi
-    native_bin="result/bin/latchkey"
-    image_tar="result-1"
+# Stop dev-cluster helpers: not built yet (owning ticket below).
+dev-stop:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-20 dev-stop
 
-    echo "==> native smoke: --help / --version / serve must fail"
-    [[ -x "$native_bin" ]] || fail "$native_bin missing or not executable"
+# Generate CRDs: not built yet (owning ticket below).
+generate-crd:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-16 generate-crd
 
-    version_line="$("$native_bin" --version)" || fail "native --version failed"
-    expected_version="latchkey $(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
-    [[ "$version_line" == "$expected_version" ]] \
-      || fail "native --version printed '$version_line', want '$expected_version'"
+# Plan a release for a commit: not built yet (owning ticket below).
+release-plan sha:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-4 release-plan "$@"
 
-    help_out="$("$native_bin" --help)" || fail "native --help failed"
-    grep -q "not implemented" <<<"$help_out" \
-      || fail "native --help must state the gateway is not implemented"
+# Publish a release: not built yet (owning ticket below).
+release-publish sha:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-7 release-publish "$@"
 
-    if serve_out="$("$native_bin" serve 2>&1)"; then
-      fail "'latchkey serve' unexpectedly succeeded: $serve_out"
-    fi
-    grep -q "the gateway is not implemented" <<<"$serve_out" \
-      || fail "serve refusal must state the gateway is not implemented"
-    echo "native serve refused with: $(head -n1 <<<"$serve_out")"
+# Verify a published release: not built yet (owning ticket below).
+release-verify sha:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-7 release-verify "$@"
 
-    echo "==> OCI smoke: extract image layers, run the static binary directly"
-    smoke_dir="$(mktemp -d)"
-    # Extracted store paths are read-only (as in the nix store); make them
-    # writable again so cleanup succeeds.
-    trap 'chmod -R u+w "$smoke_dir" 2>/dev/null || true; rm -rf "$smoke_dir"' EXIT
-    mkdir -p "$smoke_dir/layers" "$smoke_dir/rootfs"
+# Foundation audit: not built yet (owning ticket below).
+foundation-audit:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-8 foundation-audit
 
-    if tar -tzf "$image_tar" >/dev/null 2>&1; then
-      tar -xzf "$image_tar" -C "$smoke_dir/layers"
-    else
-      tar -xf "$image_tar" -C "$smoke_dir/layers"
-    fi
+# Standalone E2E (real processes/HTTP, no cluster): not built yet (owning ticket below).
+e2e-standalone:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-21 e2e-standalone
 
-    manifest="$smoke_dir/layers/manifest.json"
-    [[ -f "$manifest" ]] || fail "image archive has no manifest.json"
-    # Manifests are pretty-printed; each layer reference sits on its own
-    # line and always ends in layer.tar.
-    layers="$(grep -oE '"[^"]+layer\.tar"' "$manifest" | tr -d '"' || true)"
-    [[ -n "$layers" ]] || fail "could not parse layer list from manifest.json"
-    while IFS= read -r layer; do
-      [[ -f "$smoke_dir/layers/$layer" ]] || fail "missing layer $layer"
-      tar -xf "$smoke_dir/layers/$layer" -C "$smoke_dir/rootfs" 2>/dev/null \
-        || tar -xzf "$smoke_dir/layers/$layer" -C "$smoke_dir/rootfs"
-    done <<<"$layers"
+# Render Kubernetes manifests: not built yet (owning ticket below).
+k8s-render:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-24 k8s-render
 
-    # The entrypoint must be wired at /bin/latchkey.
-    [[ -e "$smoke_dir/rootfs/bin/latchkey" || -L "$smoke_dir/rootfs/bin/latchkey" ]] \
-      || fail "image root has no /bin/latchkey entrypoint"
+# Create the opt-in test cluster: not built yet (owning ticket below).
+k8s-test-up:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-24 k8s-test-up
 
-    img_bin="$(find "$smoke_dir/rootfs/nix/store" -path '*/bin/latchkey' -type f 2>/dev/null | head -n1 || true)"
-    [[ -n "$img_bin" ]] || fail "latchkey binary not found in image layers"
-    [[ -x "$img_bin" ]] || fail "extracted latchkey binary is not executable"
+# Run cluster tests (LATCHKEY_TEST_KUBECONFIG opt-in): not built yet (owning ticket below).
+k8s-test-run:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-24 k8s-test-run
 
-    # Static proof: a dynamically linked binary would embed an ld.so loader
-    # path; the musl image binary must not.
-    if grep -qa "ld-linux" "$img_bin"; then
-      fail "OCI binary references ld-linux: it is not a static musl binary"
-    fi
+# Destroy the opt-in test cluster: not built yet (owning ticket below).
+k8s-test-down:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-24 k8s-test-down
 
-    img_version="$("$img_bin" --version)" || fail "OCI --version failed"
-    [[ "$img_version" == "$expected_version" ]] \
-      || fail "OCI --version printed '$img_version', want '$expected_version'"
+# MVP acceptance run: not built yet (owning ticket below).
+mvp-acceptance:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-28 mvp-acceptance
 
-    img_help="$("$img_bin" --help)" || fail "OCI --help failed"
-    grep -q "not implemented" <<<"$img_help" \
-      || fail "OCI --help must state the gateway is not implemented"
+# Migration preflight (M01): not built yet (owning ticket below).
+migration-preflight:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-29 migration-preflight
 
-    if img_serve="$("$img_bin" serve 2>&1)"; then
-      fail "OCI 'serve' unexpectedly succeeded: $img_serve"
-    fi
-    grep -q "the gateway is not implemented" <<<"$img_serve" \
-      || fail "OCI serve refusal must state the gateway is not implemented"
+# Migration rehearsal (M01): not built yet (owning ticket below).
+migration-rehearse:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-29 migration-rehearse
 
-    echo "candidate-check: all gates passed"
+# Migration cutover (M02): not built yet (owning ticket below).
+migration-cutover:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-30 migration-cutover
+
+# Migration verification (M02): not built yet (owning ticket below).
+migration-verify:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-30 migration-verify
+
+# Migration rollback (M02): not built yet (owning ticket below).
+migration-rollback:
+    "{{justfile_directory()}}/scripts/dev/future.sh" LATCH-30 migration-rollback
+
+# Remove selected local outputs only (.dev/, target/, result*, logs); keeps caches.
+clean:
+    "{{justfile_directory()}}/scripts/dev/clean.sh"

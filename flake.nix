@@ -158,10 +158,21 @@
         text = builtins.readFile ./scripts/bootstrap;
       };
 
-      # devShell used by `nix develop -c ...` (and by every just recipe that
-      # runs cargo) so local shells and CI see the same tools.
+      # devShell used by `nix develop -c ...` and by `just setup`
+      # (`nix print-dev-env`) so local shells, the cached `.dev/env`, and CI
+      # see the same tools. shellcheck/actionlint/python3/zstd are the
+      # cached-environment additions of LATCH-3: shellcheck lints the
+      # dispatcher scripts, actionlint is available for workflow linting,
+      # python3 runs `just script-test`, and zstd unpacks the crane deps
+      # seed archives during a cold setup.
       devShell = pkgs.mkShell {
-        packages = [ devTools ];
+        packages = [
+          devTools
+          pkgs.shellcheck
+          pkgs.actionlint
+          pkgs.python3
+          pkgs.zstd
+        ];
       };
     in
     {
