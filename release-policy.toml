@@ -1,0 +1,13 @@
+# Latchkey release policy (LATCH-4, F05).
+#
+# Release metadata is a pure function of committed history: scripts/release.py
+# derives every version by folding the FIRST-PARENT chain from --commit down to
+# the anchor below. Mutable tag state never influences version derivation.
+# See docs/releases.md for the full contract (traversal, rejections, artifact
+# naming, rendering, and the exact tag rules).
+
+[history]
+# Requirements baseline the release history starts *after*.
+anchor = "52623fd4c3622288ee0b939e547c6f07e03423e5"
+# Version of the anchor itself; each chained squash commit bumps from here.
+starting_version = "0.0.0"
