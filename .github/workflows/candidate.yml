@@ -88,22 +88,34 @@ jobs:
           extra_nix_config: |
             substituters = https://cache.nixos.org/ https://nix-community.cachix.org
             trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
-      - name: Bootstrap trusted cached toolchain
-        run: nix run .#bootstrap
+      - name: Materialize candidate environment with trusted setup
+        env:
+          LK_ROOT: ${{ github.workspace }}/candidate
+        run: scripts/dev/setup.sh
+      - name: Verify candidate fingerprint with trusted doctor
+        env:
+          LK_ROOT: ${{ github.workspace }}/candidate
+        run: |
+          set -euo pipefail
+          source candidate/.dev/env
+          "$LATCHKEY_JUST" --justfile "$GITHUB_WORKSPACE/justfile" --working-directory "$GITHUB_WORKSPACE/candidate" doctor
       - name: Derive exact candidate cache identity
         id: target-cache-key
         run: |
-          key="$(nix develop -c python3 "$GITHUB_WORKSPACE/scripts/ci/candidate.py" cache-key --trusted "$GITHUB_WORKSPACE" --repository "$GITHUB_WORKSPACE/candidate" --source "$GITHUB_WORKSPACE/candidate" --batch /tmp/candidate-batch.json)"
+          key="$(python3 "$GITHUB_WORKSPACE/scripts/ci/candidate.py" cache-key --trusted "$GITHUB_WORKSPACE" --repository "$GITHUB_WORKSPACE/candidate" --source "$GITHUB_WORKSPACE/candidate" --batch /tmp/candidate-batch.json)"
           echo "key=$key" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
-          path: ~/.cache/latchkey-candidate-target
+          path: candidate/.dev/target
           key: ${{ steps.target-cache-key.outputs.key }}
       - name: Reconstruct, plan and validate every prefix
         env:
           REQUESTED_SHA: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
           LK_ROOT: ${{ github.workspace }}/candidate
-        run: nix develop -c python3 "$GITHUB_WORKSPACE/scripts/ci/candidate.py" run --trusted "$GITHUB_WORKSPACE" --repository "$GITHUB_WORKSPACE/candidate" --source "$GITHUB_WORKSPACE/candidate" --batch /tmp/candidate-batch.json --requested-sha "$REQUESTED_SHA" --target-dir "$HOME/.cache/latchkey-candidate-target"
+        run: |
+          set -euo pipefail
+          source candidate/.dev/env
+          "$LATCHKEY_PYTHON3" "$GITHUB_WORKSPACE/scripts/ci/candidate.py" run --trusted "$GITHUB_WORKSPACE" --repository "$GITHUB_WORKSPACE/candidate" --source "$GITHUB_WORKSPACE/candidate" --batch /tmp/candidate-batch.json --requested-sha "$REQUESTED_SHA"
       - name: Read deterministic evidence artifact name
         id: evidence
         run: echo "artifact_name=$(python3 -c 'import json; print(json.load(open("candidate/candidate-evidence/manifest.json"))["artifact_name"])')" >> "$GITHUB_OUTPUT"

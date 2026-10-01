@@ -57,11 +57,21 @@ jobs:
             exit 1
           fi
           python3 scripts/release.py --root "$GITHUB_WORKSPACE/candidate" validate-fragment --base "$base"
-      - name: Bootstrap trusted toolchain
-        run: nix run .#bootstrap
-      - name: Share trusted cached toolchain with candidate worktree
-        run: ln -s "$GITHUB_WORKSPACE/.dev" "$GITHUB_WORKSPACE/candidate/.dev"
+      - name: Materialize candidate environment with trusted setup
+        env:
+          LK_ROOT: ${{ github.workspace }}/candidate
+        run: scripts/dev/setup.sh
+      - name: Verify candidate fingerprint with trusted doctor
+        env:
+          LK_ROOT: ${{ github.workspace }}/candidate
+        run: |
+          set -euo pipefail
+          source candidate/.dev/env
+          "$LATCHKEY_JUST" --justfile "$GITHUB_WORKSPACE/justfile" --working-directory "$GITHUB_WORKSPACE/candidate" doctor
       - name: pr-check
         env:
           LK_ROOT: ${{ github.workspace }}/candidate
-        run: nix develop -c just --justfile "$GITHUB_WORKSPACE/justfile" --working-directory "$GITHUB_WORKSPACE/candidate" pr-check
+        run: |
+          set -euo pipefail
+          source candidate/.dev/env
+          "$LATCHKEY_JUST" --justfile "$GITHUB_WORKSPACE/justfile" --working-directory "$GITHUB_WORKSPACE/candidate" pr-check

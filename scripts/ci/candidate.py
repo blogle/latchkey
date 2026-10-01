@@ -194,25 +194,24 @@ def execute(args: argparse.Namespace) -> None:
     features = digest(b"--locked --offline --no-default-features;features=default")
     profile = "ci"
     suites = _capability_suites(trusted, repository, args.requested_sha)
-    shared_dev_env = os.path.join(trusted, ".dev")
-    source_dev_env = os.path.join(source, ".dev")
-    if os.path.isdir(shared_dev_env) and not os.path.lexists(source_dev_env):
-        os.symlink(shared_dev_env, source_dev_env, target_is_directory=True)
+    # F03 fingerprints include the checkout path and Cargo inputs. The trusted
+    # workflow must materialize this checkout's environment; never transplant
+    # another checkout's .dev directory.
+    if not os.path.isfile(os.path.join(source, ".dev", "env")):
+        raise ValueError("candidate .dev/env is missing; run trusted setup.sh for the candidate checkout")
     evidence_dir = __import__("pathlib").Path(args.evidence).resolve()
     artifacts_dir = evidence_dir / "artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    target = os.path.realpath(args.target_dir)
-    target_identity = digest("\0".join((lock_fingerprint, toolchain, features, profile,
-                                         os.environ.get("CARGO_BUILD_TARGET", "host"))).encode())
-    target = os.path.join(target, target_identity)
+    target_env = os.environ.copy()
+    target_env["LK_ROOT"] = source
+    target = _run(["bash", "-c", 'source "$1/scripts/dev/lib.sh"; lk_target_dir ci',
+                   "candidate-target", trusted], cwd=source, env=target_env).decode().strip()
     all_prefixes: list[dict[str, Any]] = []
     all_passed = True
     for index, prefix in enumerate(prefixes, 1):
         worktree = tempfile.mkdtemp(prefix="latchkey-prefix-")
         try:
             git(repository, "worktree", "add", "--detach", worktree, prefix["commit"])
-            if os.path.isdir(shared_dev_env):
-                os.symlink(shared_dev_env, os.path.join(worktree, ".dev"), target_is_directory=True)
             plan_cmd = [sys.executable, os.path.join(trusted, "scripts/release.py"), "--root", source,
                         "--policy", os.path.join(trusted, "release-policy.toml"), "plan",
                         "--commit", prefix["commit"], "--json"]
@@ -225,11 +224,13 @@ def execute(args: argparse.Namespace) -> None:
             env.pop("GITHUB_TOKEN", None)
             env.pop("GH_TOKEN", None)
             env.pop("GITHUB_READ_TOKEN", None)
+            env["LK_ROOT"] = source
             env["CARGO_TARGET_DIR"] = target
-            env["LK_ROOT"] = worktree
             env["CARGO_NET_OFFLINE"] = "true"
             env["CARGO_PROFILE"] = profile
-            _run(["cargo", "build", "--locked", "--offline", "--profile", profile, "--bin", "latchkey"], cwd=worktree, env=env)
+            env["LATCHKEY_PROFILE"] = profile
+            _run(["just", "--justfile", os.path.join(trusted, "justfile"),
+                  "--working-directory", worktree, "build"], cwd=worktree, env=env)
             binary = __import__("pathlib").Path(target) / profile / "latchkey"
             if not binary.is_file():
                 raise ValueError("cargo build did not produce expected root binary")
@@ -442,7 +443,6 @@ def main() -> int:
     run.add_argument("--source", required=True)
     run.add_argument("--batch", required=True)
     run.add_argument("--requested-sha", required=True)
-    run.add_argument("--target-dir", required=True)
     run.add_argument("--evidence", default="candidate-evidence")
     key = subparsers.add_parser("cache-key", help="derive the exact immutable candidate target cache key")
     key.add_argument("--repository", required=True)

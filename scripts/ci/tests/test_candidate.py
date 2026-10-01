@@ -166,6 +166,7 @@ class CandidateTests(unittest.TestCase):
         git("config", "user.email", "fixture@example.invalid")
         (repo / "Cargo.toml").write_text('[package]\nname = "latchkey"\nversion = "0.1.0"\nedition = "2024"\n')
         (repo / "Cargo.lock").write_text('version = 4\n\n[[package]]\nname = "latchkey"\nversion = "0.1.0"\n')
+        (repo / "flake.lock").write_text('{"nodes":{}}\n')
         (repo / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.96.0"\n')
         (repo / ".changes").mkdir()
         (repo / "scripts/ci").mkdir(parents=True)
@@ -196,6 +197,8 @@ print(json.dumps({"tree": tree, "version": f"1.2.{len(files)}"}))
         shutil.copy(ROOT / "scripts/ci/inject_root_version.py", trusted / "scripts/ci/inject_root_version.py")
         shutil.copy(ROOT / "ci/capabilities.toml", trusted / "ci/capabilities.toml")
         shutil.copy(ROOT / "justfile", trusted / "justfile")
+        (trusted / "scripts/dev").mkdir(parents=True)
+        shutil.copy(ROOT / "scripts/dev/lib.sh", trusted / "scripts/dev/lib.sh")
         (trusted / "release-policy.toml").write_text("fixture policy\n")
         (trusted / "scripts/release.py").write_text('''import json, subprocess, sys
 root = sys.argv[sys.argv.index("--root") + 1]
@@ -215,27 +218,46 @@ print(json.dumps({"tree": tree, "version": f"9.8.{len(files)}"}))
         cargo.chmod(0o755)
         cargo.write_text('''#!/usr/bin/env python3
 import os, pathlib, re
+if (pathlib.Path.cwd() / ".dev").exists(): raise SystemExit("prefix worktree unexpectedly has .dev")
 marker = os.environ.get("TOKEN_MARKER")
 if marker: pathlib.Path(marker).write_text(os.environ.get("GITHUB_TOKEN", "") + "|" + os.environ.get("GH_TOKEN", ""))
 version = re.search(r'version = "([^"]+)"', pathlib.Path("Cargo.toml").read_text()).group(1)
 binary = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / "ci/latchkey"
 binary.parent.mkdir(parents=True, exist_ok=True)
+dependency = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / "dependency-built"
+build_log = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / "fixture-cargo-builds"
+with build_log.open("a") as stream: stream.write(str(pathlib.Path.cwd()) + "\\n")
+if not dependency.exists(): dependency.write_text("Fresh dependency build\\n")
+else: dependency.write_text(dependency.read_text() + "Fresh dependencies; root crate recompiled\\n")
 binary.write_text("#!/bin/sh\\nif [ \\"$1\\" = --version ]; then echo latchkey " + version + "; else echo help; fi\\n")
 binary.chmod(0o755)
 ''')
         cargo.chmod(0o755)
         just = tools / "just"
-        just.write_text('#!/usr/bin/env python3\nimport os, sys\nfrom pathlib import Path\np=os.environ.get("TOKEN_MARKER")\nif p: Path(p).write_text(os.environ.get("GITHUB_TOKEN", "") + "|" + os.environ.get("GH_TOKEN", ""))\nsys.exit(1 if os.environ.get("FAIL_GATE") in sys.argv else 0)\n')
+        just.write_text('#!/usr/bin/env python3\nimport os, subprocess, sys\nfrom pathlib import Path\np=os.environ.get("TOKEN_MARKER")\nif p: Path(p).write_text(os.environ.get("GITHUB_TOKEN", "") + "|" + os.environ.get("GH_TOKEN", ""))\nif "build" in sys.argv: subprocess.run([os.environ["FAKE_CARGO"]], check=True)\nsys.exit(1 if os.environ.get("FAIL_GATE") in sys.argv else 0)\n')
         just.chmod(0o755)
+        dev = repo / ".dev"
+        dev.mkdir()
+        (dev / "env").write_text("# candidate-path environment\n")
+        (dev / "toolchain-id").write_text("rustc fixture\n")
+        fp = subprocess.check_output(["bash", "-c", 'source "$1/scripts/dev/lib.sh"; lk_fingerprint',
+                                      "fixture", str(trusted)], cwd=repo,
+                                     env={**os.environ, "LK_ROOT": str(repo)}, text=True).strip()
+        (dev / "fingerprint").write_text(fp)
+        current_fp = subprocess.check_output(["bash", "-c", 'source "$1/scripts/dev/lib.sh"; lk_fingerprint',
+                                               "fixture", str(trusted)], cwd=repo,
+                                              env={**os.environ, "LK_ROOT": str(repo)}, text=True).strip()
+        self.assertEqual(fp, current_fp)
+        self.assertEqual((dev / "fingerprint").read_text().strip(), current_fp)
         evidence = root / "candidate-evidence"
         env = os.environ.copy()
         env.update({"PATH": f"{tools}:{env['PATH']}", "GITHUB_RUN_ID":"42",
                     "GITHUB_TOKEN":"must-not-leak", "GH_TOKEN":"also-must-not-leak",
-                    "CANDIDATE_TEST_SUITES": '["just candidate-override"]',
-                    "TOKEN_MARKER":str(root / "token-marker")})
+                     "CANDIDATE_TEST_SUITES": '["just candidate-override"]',
+                     "TOKEN_MARKER":str(root / "token-marker"), "FAKE_CARGO":str(cargo)})
         command = [sys.executable, str(repo / "scripts/ci/candidate.py"), "run", "--repository", str(repo),
                    "--trusted", str(trusted), "--source", str(repo), "--batch", str(batch), "--requested-sha", heads[-1],
-                   "--target-dir", str(root / "target"), "--evidence", str(evidence)]
+                   "--evidence", str(evidence)]
         subprocess.run(command, cwd=repo, env=env, check=True)
         manifest = json.loads((evidence / "manifest.json").read_text())
         versions = [p["release_version"] for p in manifest["ordered_prs"]]
@@ -247,6 +269,16 @@ binary.chmod(0o755)
             self.assertEqual(candidate.digest(artifact.read_bytes()), prefix["artifact"]["sha256"])
         self.assertTrue((evidence / "SHA256SUMS").is_file())
         self.assertNotIn("must-not-leak", (root / "token-marker").read_text())
+        target_path = subprocess.check_output(["bash", "-c", 'source "$1/scripts/dev/lib.sh"; lk_target_dir ci',
+                                               "fixture", str(trusted)], cwd=repo,
+                                              env={**os.environ, "LK_ROOT": str(repo)}, text=True).strip()
+        self.assertEqual(Path(target_path).parent, dev / "target")
+        build_worktrees = (Path(target_path) / "fixture-cargo-builds").read_text().splitlines()
+        self.assertEqual(len(build_worktrees), 4)  # successful and expected-failure runs
+        self.assertEqual(len(set(build_worktrees)), 2)
+        reuse_log = (Path(target_path) / "dependency-built").read_text()
+        self.assertEqual(reuse_log.count("Fresh dependency build"), 1)
+        self.assertEqual(reuse_log.count("root crate recompiled"), 3)
         suite = tools / "foundation-check"
         suite.write_text('#!/usr/bin/env python3\nfrom pathlib import Path\nimport sys\nsys.exit(1 if len(list(Path(".changes").glob("*.toml"))) == 1 else 0)\n')
         suite.chmod(0o755)
