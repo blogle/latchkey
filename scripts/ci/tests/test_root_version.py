@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -20,16 +21,33 @@ class RootVersionTests(unittest.TestCase):
             root = Path(temporary)
             shutil.copy2(ROOT / "Cargo.toml", root / "Cargo.toml")
             shutil.copy2(ROOT / "Cargo.lock", root / "Cargo.lock")
+            before_manifest_text = (root / "Cargo.toml").read_text()
+            before_manifest = tomllib.loads(before_manifest_text)
             before_lock_text = (root / "Cargo.lock").read_text()
             before = tomllib.loads(before_lock_text)
+            starting_version = before_manifest["package"]["version"]
+            root_entries = [entry for entry in before["package"] if entry["name"] == "latchkey"]
+            self.assertEqual(len(root_entries), 1)
+            self.assertEqual(root_entries[0]["version"], starting_version)
 
             inject_root_version.inject(root, "9.9.9")
 
-            manifest = tomllib.loads((root / "Cargo.toml").read_text())
+            after_manifest_text = (root / "Cargo.toml").read_text()
+            manifest = tomllib.loads(after_manifest_text)
             after_lock_text = (root / "Cargo.lock").read_text()
             after = tomllib.loads(after_lock_text)
             self.assertEqual(manifest["package"]["version"], "9.9.9")
-            root_lock_marker = 'name = "latchkey"\nversion = "0.0.0"'
+            root_manifest_pattern = re.compile(
+                r'(?ms)(^\[package\]\n.*?^version\s*=\s*)"'
+                + re.escape(starting_version)
+                + r'"'
+            )
+            expected_manifest_text, manifest_replacements = root_manifest_pattern.subn(
+                r'\g<1>"9.9.9"', before_manifest_text, count=1
+            )
+            self.assertEqual(manifest_replacements, 1)
+            self.assertEqual(after_manifest_text, expected_manifest_text)
+            root_lock_marker = f'name = "latchkey"\nversion = "{starting_version}"'
             self.assertEqual(before_lock_text.count(root_lock_marker), 1)
             self.assertEqual(
                 after_lock_text,
