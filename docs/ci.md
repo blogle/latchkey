@@ -5,10 +5,12 @@
 `.github/workflows/pr.yml` accepts only same-repository pull requests to
 `master`. It checks out the PR base first and runs `validate_pr.py --event-only`
 from that trusted revision before checking out the requested head into a
-separate directory. It validates exact same-repository head SHA, rejects merge
-commits since merge base, validates the release fragment, then runs `just
-pr-check`. `pr-fast` is the stable queue-admission check; queue PRs do not run
-this workflow.
+separate directory (with persisted checkout credentials disabled). It
+validates exact same-repository head SHA, rejects merge commits since merge
+base, and runs the trusted F05 fragment validator with `--root` pointing at the
+candidate checkout. The trusted justfile and dispatcher run `pr-check` against
+the candidate checkout via `--working-directory` and `LK_ROOT`. `pr-fast` is
+the stable queue-admission check; queue PRs do not run this workflow.
 
 ## Candidate metadata and trust boundary
 
@@ -31,17 +33,29 @@ trusted metadata resolution; candidate Python and Cargo receive none.
 
 ## Prefix execution and evidence
 
+The trusted base checkout supplies the event/batch validators, candidate
+orchestrator, cache-key code, F05 planner, root-version injector, and capability
+policy. The candidate checkout is only the Git object/source input and has
+`persist-credentials: false`. GitHub credentials exist only in trusted
+metadata-resolution steps. Candidate build/test subprocesses explicitly drop
+`GITHUB_TOKEN`, `GH_TOKEN`, and `GITHUB_READ_TOKEN`.
+
 `candidate.py run` independently reconstructs each ordered base-to-head patch
 with Git plumbing, rejects merge commits and anything other than one newly
-added fragment, and writes synthetic one-parent commits. It runs the F05
-`scripts/release.py plan --commit ... --json`, overlays the planned version
-with `inject_root_version.py` in a disposable worktree, then builds the root
+added fragment, and writes synthetic one-parent commits. The trusted F05
+`scripts/release.py --root <candidate> --policy <trusted release-policy.toml>
+plan --commit ... --json` reads candidate commit objects/fragments while
+preserving the trusted release policy. It overlays the planned version
+with the trusted `inject_root_version.py` in a disposable worktree, then builds the root
 binary with pinned Cargo 1.96.0 and the cached development environment. Each
 versioned binary must report the planned `--version` and support `--help`.
-The active foundation gates are selected from `ci/capabilities.toml` and run
-for each prefix; the complete `just candidate-check` runs once for the final
-candidate after prefix validation. Earlier prefix failure is never repaired
-by a later pass.
+Trusted master `ci/capabilities.toml` gates are mandatory. Candidate capability
+data is checked for preservation of every trusted stage/gate and cumulative
+transitions; valid owned additions are dispatched through the trusted justfile.
+No environment variable can replace suite policy. Prefix suites and the
+complete final `candidate-check` use trusted just/dispatch scripts with the
+candidate worktree/source as `LK_ROOT` and working directory. Earlier prefix
+failure is never repaired by a later pass.
 
 The per-prefix build uses the shared Cargo target because the experiment in
 `edb7609` demonstrated that changing only the root package version and its

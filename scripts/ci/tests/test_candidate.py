@@ -173,7 +173,7 @@ class CandidateTests(unittest.TestCase):
         shutil = __import__("shutil")
         shutil.copy(ROOT / "scripts/ci/candidate.py", repo / "scripts/ci/candidate.py")
         shutil.copy(ROOT / "scripts/ci/inject_root_version.py", repo / "scripts/ci/inject_root_version.py")
-        (repo / "ci/capabilities.toml").write_text('[[stages]]\nid="foundation"\ngates=[{command="just noop"}]\n')
+        shutil.copy(ROOT / "ci/capabilities.toml", repo / "ci/capabilities.toml")
         (repo / "scripts/release.py").write_text('''import json, subprocess, sys
 commit = sys.argv[sys.argv.index("--commit") + 1]
 tree = subprocess.check_output(["git", "rev-parse", commit + "^{tree}"], text=True).strip()
@@ -190,6 +190,20 @@ print(json.dumps({"tree": tree, "version": f"1.2.{len(files)}"}))
             git("commit", "-qm", filename)
             heads.append(git("rev-parse", "HEAD"))
         tree = git("rev-parse", "HEAD^{tree}")
+        trusted = root / "trusted"
+        (trusted / "scripts/ci").mkdir(parents=True)
+        (trusted / "ci").mkdir()
+        shutil.copy(ROOT / "scripts/ci/inject_root_version.py", trusted / "scripts/ci/inject_root_version.py")
+        shutil.copy(ROOT / "ci/capabilities.toml", trusted / "ci/capabilities.toml")
+        shutil.copy(ROOT / "justfile", trusted / "justfile")
+        (trusted / "release-policy.toml").write_text("fixture policy\n")
+        (trusted / "scripts/release.py").write_text('''import json, subprocess, sys
+root = sys.argv[sys.argv.index("--root") + 1]
+commit = sys.argv[sys.argv.index("--commit") + 1]
+tree = subprocess.check_output(["git", "-C", root, "rev-parse", commit + "^{tree}"], text=True).strip()
+files = subprocess.check_output(["git", "-C", root, "ls-tree", "-r", "--name-only", commit, "--", ".changes"], text=True).splitlines()
+print(json.dumps({"tree": tree, "version": f"9.8.{len(files)}"}))
+''')
         batch = root / "batch.json"
         batch.write_text(json.dumps({"schema":"latchkey-candidate-batch/v1", "base_sha":base,
             "requested_tree":tree,"pull_requests":[{"number":1,"head_sha":heads[0],"base_sha":base},
@@ -201,6 +215,8 @@ print(json.dumps({"tree": tree, "version": f"1.2.{len(files)}"}))
         cargo.chmod(0o755)
         cargo.write_text('''#!/usr/bin/env python3
 import os, pathlib, re
+marker = os.environ.get("TOKEN_MARKER")
+if marker: pathlib.Path(marker).write_text(os.environ.get("GITHUB_TOKEN", "") + "|" + os.environ.get("GH_TOKEN", ""))
 version = re.search(r'version = "([^"]+)"', pathlib.Path("Cargo.toml").read_text()).group(1)
 binary = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / "ci/latchkey"
 binary.parent.mkdir(parents=True, exist_ok=True)
@@ -209,36 +225,68 @@ binary.chmod(0o755)
 ''')
         cargo.chmod(0o755)
         just = tools / "just"
-        just.write_text('#!/bin/sh\nexit 0\n')
+        just.write_text('#!/usr/bin/env python3\nimport os, sys\nfrom pathlib import Path\np=os.environ.get("TOKEN_MARKER")\nif p: Path(p).write_text(os.environ.get("GITHUB_TOKEN", "") + "|" + os.environ.get("GH_TOKEN", ""))\nsys.exit(1 if os.environ.get("FAIL_GATE") in sys.argv else 0)\n')
         just.chmod(0o755)
         evidence = root / "candidate-evidence"
         env = os.environ.copy()
-        env.update({"PATH": f"{tools}:{env['PATH']}", "CANDIDATE_TEST_SUITES":"[\"just noop\"]",
-                    "GITHUB_RUN_ID":"42"})
+        env.update({"PATH": f"{tools}:{env['PATH']}", "GITHUB_RUN_ID":"42",
+                    "GITHUB_TOKEN":"must-not-leak", "GH_TOKEN":"also-must-not-leak",
+                    "CANDIDATE_TEST_SUITES": '["just candidate-override"]',
+                    "TOKEN_MARKER":str(root / "token-marker")})
         command = [sys.executable, str(repo / "scripts/ci/candidate.py"), "run", "--repository", str(repo),
-                   "--source", str(repo), "--batch", str(batch), "--requested-sha", heads[-1],
+                   "--trusted", str(trusted), "--source", str(repo), "--batch", str(batch), "--requested-sha", heads[-1],
                    "--target-dir", str(root / "target"), "--evidence", str(evidence)]
         subprocess.run(command, cwd=repo, env=env, check=True)
         manifest = json.loads((evidence / "manifest.json").read_text())
         versions = [p["release_version"] for p in manifest["ordered_prs"]]
-        self.assertTrue(all(version.startswith("1.2.") for version in versions))
+        self.assertTrue(all(version.startswith("9.8.") for version in versions))
         self.assertNotEqual(versions[0], versions[1])
         self.assertEqual([p["head_sha"] for p in manifest["ordered_prs"]], heads)
         for prefix in manifest["ordered_prs"]:
             artifact = evidence / prefix["artifact"]["filename"]
             self.assertEqual(candidate.digest(artifact.read_bytes()), prefix["artifact"]["sha256"])
         self.assertTrue((evidence / "SHA256SUMS").is_file())
+        self.assertNotIn("must-not-leak", (root / "token-marker").read_text())
         suite = tools / "foundation-check"
         suite.write_text('#!/usr/bin/env python3\nfrom pathlib import Path\nimport sys\nsys.exit(1 if len(list(Path(".changes").glob("*.toml"))) == 1 else 0)\n')
         suite.chmod(0o755)
         failed_evidence = root / "failed-evidence"
         failing_env = env.copy()
-        failing_env["CANDIDATE_TEST_SUITES"] = '["foundation-check"]'
+        failing_env["FAIL_GATE"] = "fmt-check"
         failed_command = command.copy()
         failed_command[failed_command.index(str(evidence))] = str(failed_evidence)
         failed = subprocess.run(failed_command, cwd=repo, env=failing_env, capture_output=True)
         self.assertNotEqual(failed.returncode, 0)
         self.assertFalse((failed_evidence / "manifest.json").exists())
+
+    def test_candidate_capabilities_cannot_remove_bootstrap_binary(self):
+        with tempfile.TemporaryDirectory(prefix="capability-policy-") as temp:
+            root = Path(temp)
+            trusted = root / "trusted"
+            source = root / "candidate"
+            (trusted / "ci").mkdir(parents=True)
+            (source / "ci").mkdir(parents=True)
+            (trusted / "ci/capabilities.toml").write_text('''schema_version=1
+gates_are_cumulative=true
+[[stages]]
+id="foundation"
+gates=[{id="bootstrap-binary", command="just build", owner="LATCH-3"}]
+''')
+            (source / "ci/capabilities.toml").write_text('''schema_version=1
+gates_are_cumulative=true
+[[stages]]
+id="foundation"
+gates=[]
+''')
+            git = lambda *args: subprocess.run(["git", *args], cwd=source, check=True,
+                                               text=True, capture_output=True).stdout.strip()
+            git("init", "-q")
+            git("config", "user.name", "fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            git("add", ".")
+            git("commit", "-qm", "candidate")
+            with self.assertRaisesRegex(ValueError, "removed/altered trusted gate bootstrap-binary"):
+                candidate._capability_suites(str(trusted), str(source), git("rev-parse", "HEAD"))
 
 
 if __name__ == "__main__":

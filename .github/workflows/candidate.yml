@@ -88,24 +88,22 @@ jobs:
           extra_nix_config: |
             substituters = https://cache.nixos.org/ https://nix-community.cachix.org
             trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
-      - name: Bootstrap cached toolchain
-        working-directory: candidate
+      - name: Bootstrap trusted cached toolchain
         run: nix run .#bootstrap
       - name: Derive exact candidate cache identity
         id: target-cache-key
-        working-directory: candidate
         run: |
-          key="$(nix develop -c python3 scripts/ci/candidate.py cache-key --repository "$GITHUB_WORKSPACE/candidate" --source "$GITHUB_WORKSPACE/candidate" --batch /tmp/candidate-batch.json)"
+          key="$(nix develop -c python3 "$GITHUB_WORKSPACE/scripts/ci/candidate.py" cache-key --trusted "$GITHUB_WORKSPACE" --repository "$GITHUB_WORKSPACE/candidate" --source "$GITHUB_WORKSPACE/candidate" --batch /tmp/candidate-batch.json)"
           echo "key=$key" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
           path: ~/.cache/latchkey-candidate-target
           key: ${{ steps.target-cache-key.outputs.key }}
       - name: Reconstruct, plan and validate every prefix
-        working-directory: candidate
         env:
           REQUESTED_SHA: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
-        run: nix develop -c python3 scripts/ci/candidate.py run --repository "$GITHUB_WORKSPACE/candidate" --source "$GITHUB_WORKSPACE/candidate" --batch /tmp/candidate-batch.json --requested-sha "$REQUESTED_SHA" --target-dir "$HOME/.cache/latchkey-candidate-target"
+          LK_ROOT: ${{ github.workspace }}/candidate
+        run: nix develop -c python3 "$GITHUB_WORKSPACE/scripts/ci/candidate.py" run --trusted "$GITHUB_WORKSPACE" --repository "$GITHUB_WORKSPACE/candidate" --source "$GITHUB_WORKSPACE/candidate" --batch /tmp/candidate-batch.json --requested-sha "$REQUESTED_SHA" --target-dir "$HOME/.cache/latchkey-candidate-target"
       - name: Read deterministic evidence artifact name
         id: evidence
         run: echo "artifact_name=$(python3 -c 'import json; print(json.load(open("candidate/candidate-evidence/manifest.json"))["artifact_name"])')" >> "$GITHUB_OUTPUT"

@@ -23,6 +23,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Validate PR provenance from trusted base
         env:
           GITHUB_EVENT_PATH: ${{ github.event_path }}
@@ -34,6 +35,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           path: candidate
           fetch-depth: 0
+          persist-credentials: false
       - name: Verify exact candidate revision
         env:
           REQUESTED_SHA: ${{ github.event.pull_request.head.sha }}
@@ -43,21 +45,23 @@ jobs:
           extra_nix_config: |
             substituters = https://cache.nixos.org/ https://nix-community.cachix.org
             trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
-      - name: Bootstrap cached toolchain
-        working-directory: candidate
-        run: nix run .#bootstrap
       - name: Validate merge base and fragment
         shell: bash
-        working-directory: candidate
+        env:
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          git fetch --no-tags origin master
-          base="$(git merge-base origin/master HEAD)"
-          if [[ -n "$(git rev-list --merges "$base"..HEAD)" ]]; then
+          base="$(git -C candidate merge-base '${{ github.event.pull_request.base.sha }}' "$REQUESTED_SHA")"
+          if [[ -n "$(git -C candidate rev-list --merges "$base".."$REQUESTED_SHA")" ]]; then
             echo 'PR branch contains merge commits since merge base' >&2
             exit 1
           fi
-          python3 scripts/release.py validate-fragment --base "$base"
+          python3 scripts/release.py --root "$GITHUB_WORKSPACE/candidate" validate-fragment --base "$base"
+      - name: Bootstrap trusted toolchain
+        run: nix run .#bootstrap
+      - name: Share trusted cached toolchain with candidate worktree
+        run: ln -s "$GITHUB_WORKSPACE/.dev" "$GITHUB_WORKSPACE/candidate/.dev"
       - name: pr-check
-        working-directory: candidate
-        run: nix develop -c just pr-check
+        env:
+          LK_ROOT: ${{ github.workspace }}/candidate
+        run: nix develop -c just --justfile "$GITHUB_WORKSPACE/justfile" --working-directory "$GITHUB_WORKSPACE/candidate" pr-check

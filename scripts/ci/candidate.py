@@ -101,21 +101,70 @@ def _sha(repo: str, ref: str) -> str:
     return _commit(repo, ref)
 
 
-def _capability_suites(source: str) -> list[str]:
-    override = os.environ.get("CANDIDATE_TEST_SUITES")
-    if override:
-        return json.loads(override)
-    data = tomllib.loads((__import__("pathlib").Path(source) / "ci/capabilities.toml").read_text())
-    stages = {stage["id"]: stage for stage in data["stages"]}
-    stage = stages.get("foundation")
-    if not stage or not stage.get("gates"):
-        raise ValueError("capabilities.toml has no active foundation suite")
-    return [gate["command"] for gate in stage["gates"]]
+def _capability_suites(trusted: str, source: str, commit: str) -> list[str]:
+    """Use trusted mandatory foundation policy and reject candidate policy downgrades."""
+    trusted_root = __import__("pathlib").Path(trusted)
+    baseline = tomllib.loads((trusted_root / "ci/capabilities.toml").read_text())
+    candidate_text = git(source, "show", f"{commit}:ci/capabilities.toml").decode()
+    candidate = tomllib.loads(candidate_text)
+    if baseline.get("schema_version") != candidate.get("schema_version"):
+        raise ValueError("candidate capabilities schema differs from trusted baseline")
+    if candidate.get("gates_are_cumulative") is not True:
+        raise ValueError("candidate capabilities must declare cumulative gates")
+    baseline_stages = {stage.get("id"): stage for stage in baseline.get("stages", [])}
+    candidate_stages = {stage.get("id"): stage for stage in candidate.get("stages", [])}
+    trusted_implemented_gates = {
+        (gate.get("id"), gate.get("command"), gate.get("owner"))
+        for stage in baseline.get("stages", []) for gate in stage.get("gates", [])
+    }
+    if len(candidate_stages) != len(candidate.get("stages", [])):
+        raise ValueError("candidate capabilities contain duplicate stages")
+    for stage_id, stage in baseline_stages.items():
+        actual = candidate_stages.get(stage_id)
+        if actual is None or actual.get("extends") != stage.get("extends"):
+            raise ValueError(f"candidate capabilities removed/altered trusted stage {stage_id}")
+        by_id = {gate.get("id"): gate for gate in actual.get("gates", [])}
+        for gate in stage.get("gates", []):
+            if by_id.get(gate.get("id")) != gate:
+                raise ValueError(f"candidate capabilities removed/altered trusted gate {gate.get('id')}")
+    all_stages = candidate.get("stages", [])
+    known_gates: dict[str, dict[str, Any]] = {}
+    for stage in all_stages:
+        gates = stage.get("gates")
+        if not isinstance(gates, list) or not gates:
+            raise ValueError("every candidate capability stage needs gates")
+        seen: dict[str, dict[str, Any]] = {}
+        for gate in gates:
+            if (not isinstance(gate, dict) or set(gate) != {"id", "command", "owner"}
+                    or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", str(gate["id"]))
+                    or not re.fullmatch(r"just [a-z0-9][a-z0-9-]*(?: [a-z0-9][a-z0-9-]*)*", str(gate["command"]))
+                    or not re.fullmatch(r"[A-Z]+-[0-9]+", str(gate["owner"]))):
+                raise ValueError("candidate capability gate is malformed or unowned")
+            if (gate["id"], gate["command"], gate["owner"]) not in trusted_implemented_gates:
+                raise ValueError("candidate capability addition is not owned and implemented by trusted policy")
+            if gate["id"] in seen:
+                raise ValueError("duplicate candidate capability gate")
+            seen[gate["id"]] = gate
+        parent = stage.get("extends")
+        if parent:
+            if parent not in known_gates or not all(seen.get(gid) == gate for gid, gate in known_gates[parent].items()):
+                raise ValueError(f"candidate capability transition {stage.get('id')} is not cumulative")
+        known_gates[stage.get("id")] = seen
+    foundation = candidate_stages.get("foundation")
+    if foundation is None:
+        raise ValueError("candidate capabilities have no foundation stage")
+    base_ids = {gate["id"] for gate in baseline_stages["foundation"]["gates"]}
+    # The mandatory baseline commands always come from trusted master. Candidate
+    # additions are explicit data and are dispatched through the trusted justfile.
+    return [g["command"] for g in baseline_stages["foundation"]["gates"]] + [
+        g["command"] for g in foundation["gates"] if g["id"] not in base_ids
+    ]
 
 
 def execute(args: argparse.Namespace) -> None:
     source = os.path.realpath(args.source)
     repository = os.path.realpath(args.repository)
+    trusted = os.path.realpath(args.trusted)
     batch = json.loads(open(args.batch, encoding="utf-8").read())
     if set(batch) != {"schema", "base_sha", "requested_tree", "pull_requests"} or batch["schema"] != "latchkey-candidate-batch/v1":
         raise ValueError("batch must be canonical latchkey-candidate-batch/v1")
@@ -132,19 +181,23 @@ def execute(args: argparse.Namespace) -> None:
     base, requested_tree = batch["base_sha"], batch["requested_tree"]
     if not SHA.fullmatch(base) or not SHA.fullmatch(requested_tree):
         raise ValueError("batch base/tree must be full SHA-1 identifiers")
-    if _sha(source, "HEAD") != args.requested_sha:
+    if _sha(repository, "HEAD") != args.requested_sha:
         raise ValueError("candidate checkout differs from exact requested SHA")
-    if git(source, "rev-parse", "HEAD^{tree}").decode().strip() != requested_tree:
+    if git(repository, "rev-parse", "HEAD^{tree}").decode().strip() != requested_tree:
         raise ValueError("requested Mergify candidate tree differs from batch tree")
     # Reconstruct using the candidate repository object database. The workflow
     # fetches exact PR heads into this checkout after trusted metadata resolution.
-    prefixes = reconstruct_prefixes(source, base, prs, requested_tree)
+    prefixes = reconstruct_prefixes(repository, base, prs, requested_tree)
     lock_fingerprint = digest((__import__("pathlib").Path(source) / "Cargo.lock").read_bytes())
     toolchain_file = (__import__("pathlib").Path(source) / "rust-toolchain.toml").read_bytes()
     toolchain = digest(toolchain_file)
     features = digest(b"--locked --offline --no-default-features;features=default")
     profile = "ci"
-    suites = _capability_suites(source)
+    suites = _capability_suites(trusted, repository, args.requested_sha)
+    shared_dev_env = os.path.join(trusted, ".dev")
+    source_dev_env = os.path.join(source, ".dev")
+    if os.path.isdir(shared_dev_env) and not os.path.lexists(source_dev_env):
+        os.symlink(shared_dev_env, source_dev_env, target_is_directory=True)
     evidence_dir = __import__("pathlib").Path(args.evidence).resolve()
     artifacts_dir = evidence_dir / "artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -157,22 +210,23 @@ def execute(args: argparse.Namespace) -> None:
     for index, prefix in enumerate(prefixes, 1):
         worktree = tempfile.mkdtemp(prefix="latchkey-prefix-")
         try:
-            git(source, "worktree", "add", "--detach", worktree, prefix["commit"])
-            dev_env = os.path.join(source, ".dev")
-            if os.path.isdir(dev_env):
-                os.symlink(dev_env, os.path.join(worktree, ".dev"), target_is_directory=True)
-            plan_cmd = [sys.executable, os.environ.get("CANDIDATE_PLANNER", os.path.join(source, "scripts/release.py")), "plan",
+            git(repository, "worktree", "add", "--detach", worktree, prefix["commit"])
+            if os.path.isdir(shared_dev_env):
+                os.symlink(shared_dev_env, os.path.join(worktree, ".dev"), target_is_directory=True)
+            plan_cmd = [sys.executable, os.path.join(trusted, "scripts/release.py"), "--root", source,
+                        "--policy", os.path.join(trusted, "release-policy.toml"), "plan",
                         "--commit", prefix["commit"], "--json"]
             plan_data = json.loads(_run(plan_cmd, cwd=source))
             version = plan_data.get("version")
             if plan_data.get("tree") != prefix["tree"] or not re.fullmatch(r"\d+\.\d+\.\d+", str(version)):
                 raise ValueError("release planner returned invalid prefix tree/version")
-            _run([sys.executable, os.path.join(source, "scripts/ci/inject_root_version.py"), worktree, version], cwd=source)
+            _run([sys.executable, os.path.join(trusted, "scripts/ci/inject_root_version.py"), worktree, version], cwd=trusted)
             env = os.environ.copy()
             env.pop("GITHUB_TOKEN", None)
             env.pop("GH_TOKEN", None)
             env.pop("GITHUB_READ_TOKEN", None)
             env["CARGO_TARGET_DIR"] = target
+            env["LK_ROOT"] = worktree
             env["CARGO_NET_OFFLINE"] = "true"
             env["CARGO_PROFILE"] = profile
             _run(["cargo", "build", "--locked", "--offline", "--profile", profile, "--bin", "latchkey"], cwd=worktree, env=env)
@@ -186,7 +240,8 @@ def execute(args: argparse.Namespace) -> None:
             _run([str(binary), "--help"], cwd=worktree)
             suite_results = []
             for suite in suites:
-                command = suite.split()
+                command = ["just", "--justfile", os.path.join(trusted, "justfile"),
+                           "--working-directory", worktree, *suite.split()[1:]]
                 proc = subprocess.run(command, cwd=worktree, env=env, capture_output=True)
                 suite_results.append({"command": suite, "result": "passed" if proc.returncode == 0 else "failed"})
                 if proc.returncode:
@@ -204,13 +259,15 @@ def execute(args: argparse.Namespace) -> None:
             all_passed = False
             raise
         finally:
-            subprocess.run(["git", "worktree", "remove", "--force", worktree], cwd=source, capture_output=True)
+            subprocess.run(["git", "worktree", "remove", "--force", worktree], cwd=repository, capture_output=True)
     # One full final candidate gate, never repeated for each prefix.
     if all_passed:
         final_env = os.environ.copy()
         for key in ("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_READ_TOKEN"):
             final_env.pop(key, None)
-        _run(["just", "candidate-check"], cwd=source, env=final_env)
+        final_env["LK_ROOT"] = source
+        _run(["just", "--justfile", os.path.join(trusted, "justfile"),
+              "--working-directory", source, "candidate-check"], cwd=source, env=final_env)
     content_material = "\0".join([requested_tree, lock_fingerprint, toolchain, features, profile,
                                     ",".join(p["release_version"] for p in all_prefixes)])
     artifact_name = "latchkey-candidate-" + digest(content_material.encode())[:32]
@@ -241,14 +298,16 @@ def execute(args: argparse.Namespace) -> None:
 
 def print_cache_key(args: argparse.Namespace) -> None:
     source = os.path.realpath(args.source)
+    trusted = os.path.realpath(args.trusted)
     batch = json.loads(open(args.batch, encoding="utf-8").read())
     if set(batch) != {"schema", "base_sha", "requested_tree", "pull_requests"} or batch["schema"] != "latchkey-candidate-batch/v1":
         raise ValueError("batch must be canonical latchkey-candidate-batch/v1")
-    prefixes = reconstruct_prefixes(source, batch["base_sha"], batch["pull_requests"], batch["requested_tree"])
+    prefixes = reconstruct_prefixes(args.repository, batch["base_sha"], batch["pull_requests"], batch["requested_tree"])
     versions = []
     for prefix in prefixes:
-        plan = json.loads(_run([sys.executable, os.environ.get("CANDIDATE_PLANNER", os.path.join(source, "scripts/release.py")),
-                               "plan", "--commit", prefix["commit"], "--json"], cwd=source))
+        plan = json.loads(_run([sys.executable, os.path.join(trusted, "scripts/release.py"), "--root", source,
+                               "--policy", os.path.join(trusted, "release-policy.toml"), "plan",
+                               "--commit", prefix["commit"], "--json"], cwd=trusted))
         if plan.get("tree") != prefix["tree"] or not re.fullmatch(r"\d+\.\d+\.\d+", str(plan.get("version"))):
             raise ValueError("release planner returned invalid prefix tree/version")
         versions.append(plan["version"])
@@ -379,6 +438,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     run = subparsers.add_parser("run", help="run the candidate evidence pipeline")
     run.add_argument("--repository", required=True)
+    run.add_argument("--trusted", required=True, help="trusted base checkout containing CI policy and scripts")
     run.add_argument("--source", required=True)
     run.add_argument("--batch", required=True)
     run.add_argument("--requested-sha", required=True)
@@ -386,6 +446,7 @@ def main() -> int:
     run.add_argument("--evidence", default="candidate-evidence")
     key = subparsers.add_parser("cache-key", help="derive the exact immutable candidate target cache key")
     key.add_argument("--repository", required=True)
+    key.add_argument("--trusted", required=True, help="trusted base checkout containing CI policy and scripts")
     key.add_argument("--source", required=True)
     key.add_argument("--batch", required=True)
     args = parser.parse_args()
