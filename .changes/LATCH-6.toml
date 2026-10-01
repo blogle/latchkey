@@ -1,0 +1,3 @@
+category = "Changed"
+summary = "Configure Mergify batching and protected linear master policy"
+bump = "patch"
