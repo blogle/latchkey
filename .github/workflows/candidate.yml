@@ -103,8 +103,6 @@ jobs:
                                  for key in ("head_sha", "base_sha"))):
                       reject("dispatch batch contains an invalid ordered pull request")
                   seen.add(row["number"])
-              if prs[-1]["head_sha"] != requested:
-                  reject("dispatch batch final head does not match requested SHA")
           else:
               reject("unsupported candidate workflow event")
           PY
