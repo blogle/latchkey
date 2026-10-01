@@ -4,8 +4,6 @@
 queue_rules:
   - name: bootstrap
     merge_method: squash
-    update_method: rebase
-    strict: true
     conditions:
       - check-success=pr-fast
       - check-success=candidate-ready
@@ -14,7 +12,7 @@ pull_request_rules:
   - name: queue pull requests into the bootstrap queue
     conditions:
       - base=master
-      - draft=false
+      - -draft
     actions:
       queue:
         name: bootstrap
