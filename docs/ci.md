@@ -46,22 +46,32 @@ added fragment, and writes synthetic one-parent commits. The trusted F05
 `scripts/release.py --root <candidate> --policy <trusted release-policy.toml>
 plan --commit ... --json` reads candidate commit objects/fragments while
 preserving the trusted release policy. It overlays the planned version
-with the trusted `inject_root_version.py` in a disposable worktree, then builds the root
-binary with pinned Cargo 1.96.0 and the cached development environment. Each
-versioned binary must report the planned `--version` and support `--help`.
+with the trusted `inject_root_version.py` in a disposable worktree. The trusted
+`prefix_runner.py` maps trusted capability gate IDs to their foundation
+semantics and runs source-sensitive commands with that worktree as CWD: Cargo
+formatting, clippy, unit/integration tests, and build use the absolute cached
+Cargo executable; script-test discovery uses the prefix's `scripts/dev/tests`,
+`scripts/ci/tests`, and discovered `tests/<suite>` roots. Test gates fail when
+their suite reports zero tests. `pr-check` verifies its constituent fast gates
+succeeded for that same prefix. Candidate policy cannot remove or redefine
+trusted gates, and unsupported additions fail closed. Each versioned binary
+must report the planned `--version` and support `--help`.
 Trusted master `ci/capabilities.toml` gates are mandatory. Candidate capability
 data is checked for preservation of every trusted stage/gate and cumulative
-transitions; valid owned additions are dispatched through the trusted justfile.
-No environment variable can replace suite policy. Prefix suites and the
-complete final `candidate-check` use trusted just/dispatch scripts with the
-candidate worktree/source as `LK_ROOT` and working directory. Earlier prefix
-failure is never repaired by a later pass.
+transitions; valid owned additions are dispatched only if the trusted prefix
+runner implements them. No environment variable can replace suite policy. The
+complete final `candidate-check` remains a single trusted just invocation
+against the final candidate tree; prefix gates do not execute candidate
+`scripts/dev` or `candidate.py` code. A prefix failure stops the batch and its
+uniquely named gate logs remain attributed to that prefix.
 
-The per-prefix build uses the shared Cargo target because the experiment in
-`edb7609` demonstrated that changing only the root package version and its
-root lock entry recompiles only Latchkey with `--locked --offline`. Cargo
-target reuse is limited to matching toolchain, target, profile, lock and
-feature settings. This does **not** mean Nix dependency derivations are reused:
+The per-prefix build uses one explicit CI-owned `candidate-ci-target` shared
+target, keyed by the candidate-level lockfile, toolchain, profile, and feature
+identity (not the per-prefix planned root version). The root manifest and lock
+entry receive the release-version overlay in each worktree. Cargo reuses
+compatible dependencies and recompiles the root crate as its version changes;
+this target is not an F03 `.dev/target`. Cargo target reuse is limited to
+matching toolchain, target, profile, lock and feature settings. This does **not** mean Nix dependency derivations are reused:
 the `.#package` and `.#oci` derivations change under the root-lock-version
 overlay. Nix builds are deliberately performed once by final `candidate-check`,
 not once per versioned prefix.

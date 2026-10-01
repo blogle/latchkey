@@ -6,6 +6,7 @@ capabilities_file = "ci/capabilities.toml"
 release_planner = "scripts/release.py"
 candidate_check = "just candidate-check"
 cache_dimensions = ["content_tree", "cargo_lock", "toolchain", "features", "profile", "release_version"]
+prefix_target_cache_dimensions = ["cargo_lock", "toolchain", "features", "profile"]
 include_git_commit_metadata_in_content_derivation = false
 reuse_dependency_setup_within_batch = true
 require_all_prefixes = true

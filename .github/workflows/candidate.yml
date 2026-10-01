@@ -106,7 +106,7 @@ jobs:
           echo "key=$key" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
-          path: candidate/.dev/target
+          path: candidate-ci-target
           key: ${{ steps.target-cache-key.outputs.key }}
       - name: Reconstruct, plan and validate every prefix
         env:

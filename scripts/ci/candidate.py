@@ -35,6 +35,24 @@ def cache_key(tree: str, lock: str, toolchain: str, features: str, profile: str,
     return "candidate-" + digest("\0".join(dimensions).encode())
 
 
+def target_cache_key(lock: str, toolchain: str, features: str, profile: str) -> str:
+    """Shared prefix target identity; root version overlays do not split dependencies."""
+    dimensions = (lock, toolchain, features, profile)
+    if any(not value for value in dimensions):
+        raise ValueError("every prefix target cache dimension is required")
+    return "prefix-target-" + digest("\0".join(dimensions).encode())
+
+
+def _feature_fingerprint(source: str) -> str:
+    manifest = tomllib.loads((__import__("pathlib").Path(source) / "Cargo.toml").read_text())
+    # Include declared dependency feature selections as well as named package
+    # features, including target-specific/dev/build dependency declarations.
+    inputs = {key: manifest.get(key, {}) for key in
+              ("features", "dependencies", "dev-dependencies", "build-dependencies", "target", "workspace")}
+    return digest(json.dumps(inputs, sort_keys=True,
+                             separators=(",", ":")).encode())
+
+
 def validate_batch(base: str, requested_tree: str, ordered_heads: list[str], prefixes: list[dict[str, Any]]) -> None:
     if not SHA.fullmatch(base) or not SHA.fullmatch(requested_tree):
         raise ValueError("base and candidate tree must be full SHA-1 identifiers")
@@ -154,11 +172,40 @@ def _capability_suites(trusted: str, source: str, commit: str) -> list[str]:
     if foundation is None:
         raise ValueError("candidate capabilities have no foundation stage")
     base_ids = {gate["id"] for gate in baseline_stages["foundation"]["gates"]}
-    # The mandatory baseline commands always come from trusted master. Candidate
-    # additions are explicit data and are dispatched through the trusted justfile.
+    # Mandatory baseline commands always come from trusted master. Candidate
+    # additions are explicit data and are accepted only when trusted policy
+    # recognizes and implements their command semantics.
     return [g["command"] for g in baseline_stages["foundation"]["gates"]] + [
         g["command"] for g in foundation["gates"] if g["id"] not in base_ids
     ]
+
+
+def _foundation_gates(trusted: str, source: str, commit: str) -> list[dict[str, str]]:
+    """Return mandatory gate IDs selected by trusted policy, plus validated additions."""
+    # _capability_suites performs the full candidate downgrade/ownership audit.
+    required = _capability_suites(trusted, source, commit)
+    trusted_policy = tomllib.loads((__import__("pathlib").Path(trusted) / "ci/capabilities.toml").read_text())
+    candidate_policy = tomllib.loads(git(source, "show", f"{commit}:ci/capabilities.toml").decode())
+    definitions = {gate["command"]: gate for gate in trusted_policy["stages"]
+                   if gate["id"] == "foundation" for gate in gate["gates"]}
+    definitions.update({gate["command"]: gate for gate in candidate_policy["stages"]
+                        if gate["id"] == "foundation" for gate in gate["gates"]})
+    gates = []
+    for command in required:
+        gate = definitions.get(command)
+        if gate is None:
+            raise ValueError(f"foundation command has no trusted gate mapping: {command}")
+        gates.append({"id": gate["id"], "command": command})
+    return gates
+
+
+def _cached_tools(source: str) -> tuple[str, str]:
+    """Read cached absolute tools without invoking any candidate dispatcher."""
+    script = 'source "$1/.dev/env"; printf "%s\\n%s\\n" "$LATCHKEY_CARGO" "$LATCHKEY_PYTHON3"'
+    values = _run(["bash", "-c", script, "candidate-env", source], cwd=source).decode().splitlines()
+    if len(values) != 2 or any(not os.path.isabs(value) or not os.access(value, os.X_OK) for value in values):
+        raise ValueError("candidate .dev/env does not contain usable cached Cargo/Python tools")
+    return values[0], values[1]
 
 
 def execute(args: argparse.Namespace) -> None:
@@ -191,21 +238,22 @@ def execute(args: argparse.Namespace) -> None:
     lock_fingerprint = digest((__import__("pathlib").Path(source) / "Cargo.lock").read_bytes())
     toolchain_file = (__import__("pathlib").Path(source) / "rust-toolchain.toml").read_bytes()
     toolchain = digest(toolchain_file)
-    features = digest(b"--locked --offline --no-default-features;features=default")
+    features = _feature_fingerprint(source)
     profile = "ci"
-    suites = _capability_suites(trusted, repository, args.requested_sha)
-    # F03 fingerprints include the checkout path and Cargo inputs. The trusted
-    # workflow must materialize this checkout's environment; never transplant
-    # another checkout's .dev directory.
+    gates = _foundation_gates(trusted, repository, args.requested_sha)
+    suites = [gate["command"] for gate in gates]
+    # Only cached executable paths are taken from .dev/env. Foundation gates
+    # below always use a prefix worktree as both CWD and source root.
     if not os.path.isfile(os.path.join(source, ".dev", "env")):
         raise ValueError("candidate .dev/env is missing; run trusted setup.sh for the candidate checkout")
     evidence_dir = __import__("pathlib").Path(args.evidence).resolve()
     artifacts_dir = evidence_dir / "artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    target_env = os.environ.copy()
-    target_env["LK_ROOT"] = source
-    target = _run(["bash", "-c", 'source "$1/scripts/dev/lib.sh"; lk_target_dir ci',
-                   "candidate-target", trusted], cwd=source, env=target_env).decode().strip()
+    cargo, python = _cached_tools(source)
+    # This explicit CI-owned directory is shared by all disposable prefix roots.
+    target = os.path.join(os.path.dirname(source), "candidate-ci-target",
+                          target_cache_key(lock_fingerprint, toolchain, features, profile))
+    os.makedirs(target, exist_ok=True)
     all_prefixes: list[dict[str, Any]] = []
     all_passed = True
     for index, prefix in enumerate(prefixes, 1):
@@ -224,13 +272,23 @@ def execute(args: argparse.Namespace) -> None:
             env.pop("GITHUB_TOKEN", None)
             env.pop("GH_TOKEN", None)
             env.pop("GITHUB_READ_TOKEN", None)
-            env["LK_ROOT"] = source
             env["CARGO_TARGET_DIR"] = target
             env["CARGO_NET_OFFLINE"] = "true"
             env["CARGO_PROFILE"] = profile
             env["LATCHKEY_PROFILE"] = profile
-            _run(["just", "--justfile", os.path.join(trusted, "justfile"),
-                  "--working-directory", worktree, "build"], cwd=worktree, env=env)
+            prefix_logs = artifacts_dir / f"prefix-{index}-{version}-{prefix['tree'][:12]}-logs"
+            gates_file = evidence_dir / f".prefix-{index}-gates.json"
+            gates_file.write_text(json.dumps(gates), encoding="utf-8")
+            runner = os.path.join(trusted, "scripts/ci/prefix_runner.py")
+            run_cmd = [python, runner, "--root", worktree, "--target", target,
+                       "--cargo", cargo, "--python", python, "--gates", str(gates_file),
+                       "--logs", str(prefix_logs)]
+            gate_proc = subprocess.run(run_cmd, cwd=worktree, env=env, capture_output=True)
+            suite_results = json.loads((prefix_logs / "results.json").read_text()) if (prefix_logs / "results.json").is_file() else []
+            if gate_proc.returncode:
+                all_passed = False
+                raise ValueError(f"foundation gates failed for prefix {index}; results={suite_results}; "
+                                 f"runner={gate_proc.stdout!r}/{gate_proc.stderr!r}; logs: {prefix_logs}")
             binary = __import__("pathlib").Path(target) / profile / "latchkey"
             if not binary.is_file():
                 raise ValueError("cargo build did not produce expected root binary")
@@ -239,23 +297,17 @@ def execute(args: argparse.Namespace) -> None:
             if actual_version != expected_version:
                 raise ValueError(f"versioned binary --version mismatch ({actual_version!r}, expected {expected_version!r})")
             _run([str(binary), "--help"], cwd=worktree)
-            suite_results = []
-            for suite in suites:
-                command = ["just", "--justfile", os.path.join(trusted, "justfile"),
-                           "--working-directory", worktree, *suite.split()[1:]]
-                proc = subprocess.run(command, cwd=worktree, env=env, capture_output=True)
-                suite_results.append({"command": suite, "result": "passed" if proc.returncode == 0 else "failed"})
-                if proc.returncode:
-                    all_passed = False
             name = f"prefix-{index}-{version}-{prefix['tree'][:12]}"
             artifact_path = artifacts_dir / name
             shutil.copy2(binary, artifact_path)
             artifact_hash = digest(artifact_path.read_bytes())
             all_prefixes.append({"number": prs[index - 1]["number"], "head_sha": prefix["head_sha"],
                                  "synthetic_sha": prefix["commit"], "tree": prefix["tree"],
-                                 "release_version": version, "suite_results": suite_results,
+                                  "release_version": version,
+                                  "suite_results": [{"command": row["command"], "result": row["result"]}
+                                                    for row in suite_results],
                                  "artifact": {"filename": f"artifacts/{name}", "sha256": artifact_hash},
-                                 "result": "passed" if all(r["result"] == "passed" for r in suite_results) else "failed"})
+                                  "result": "passed" if all(r["result"] == "passed" for r in suite_results) else "failed"})
         except Exception:
             all_passed = False
             raise
@@ -314,8 +366,8 @@ def print_cache_key(args: argparse.Namespace) -> None:
         versions.append(plan["version"])
     lock = digest((__import__("pathlib").Path(source) / "Cargo.lock").read_bytes())
     toolchain = digest((__import__("pathlib").Path(source) / "rust-toolchain.toml").read_bytes())
-    features = digest(b"--locked --offline --no-default-features;features=default")
-    print(cache_key(batch["requested_tree"], lock, toolchain, features, "ci", ",".join(versions)))
+    features = _feature_fingerprint(source)
+    print(target_cache_key(lock, toolchain, features, "ci"))
 
 
 def canonical_json(value: dict[str, Any]) -> bytes:

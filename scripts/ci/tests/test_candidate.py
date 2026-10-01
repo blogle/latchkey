@@ -181,11 +181,33 @@ tree = subprocess.check_output(["git", "rev-parse", commit + "^{tree}"], text=Tr
 files = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", commit, "--", ".changes"], text=True).splitlines()
 print(json.dumps({"tree": tree, "version": f"1.2.{len(files)}"}))
 ''')
+        (repo / "prefix-content.txt").write_text("A\n")
+        (repo / "scripts/ci/tests").mkdir(parents=True, exist_ok=True)
+        (repo / "scripts/ci/tests/test_prefix_content.py").write_text('''from pathlib import Path
+import unittest
+class PrefixContent(unittest.TestCase):
+    def test_prefix_marker(self):
+        self.assertEqual(Path("prefix-content.txt").read_text(), "A\\n")
+''')
         git("add", ".")
         git("commit", "-qm", "base")
         base = git("rev-parse", "HEAD")
         heads = []
         for filename in ("LATCH-1.toml", "LATCH-2.toml"):
+            if filename == "LATCH-2.toml":
+                (repo / "prefix-content.txt").write_text("B\n")
+                (repo / "scripts/ci/tests/test_prefix_content.py").write_text('''from pathlib import Path
+import unittest
+class PrefixContent(unittest.TestCase):
+    def test_prefix_marker(self):
+        self.assertEqual(Path("prefix-content.txt").read_text(), "B\\n")
+''')
+                (repo / "scripts/ci/tests/test_prefix_b_only.py").write_text('''import unittest
+from pathlib import Path
+class PrefixBOnly(unittest.TestCase):
+    def test_b_only_file(self):
+        self.assertEqual(Path("prefix-content.txt").read_text(), "B\\n")
+''')
             (repo / ".changes" / filename).write_text('category = "Added"\nsummary = "fixture"\n')
             git("add", ".")
             git("commit", "-qm", filename)
@@ -195,6 +217,7 @@ print(json.dumps({"tree": tree, "version": f"1.2.{len(files)}"}))
         (trusted / "scripts/ci").mkdir(parents=True)
         (trusted / "ci").mkdir()
         shutil.copy(ROOT / "scripts/ci/inject_root_version.py", trusted / "scripts/ci/inject_root_version.py")
+        shutil.copy(ROOT / "scripts/ci/prefix_runner.py", trusted / "scripts/ci/prefix_runner.py")
         shutil.copy(ROOT / "ci/capabilities.toml", trusted / "ci/capabilities.toml")
         shutil.copy(ROOT / "justfile", trusted / "justfile")
         (trusted / "scripts/dev").mkdir(parents=True)
@@ -218,6 +241,14 @@ print(json.dumps({"tree": tree, "version": f"9.8.{len(files)}"}))
         cargo.chmod(0o755)
         cargo.write_text('''#!/usr/bin/env python3
 import os, pathlib, re
+import sys
+args = sys.argv[1:]
+if os.environ.get("FAIL_GATE") == args[0]: raise SystemExit(1)
+if args[0] == "test":
+    print("running 1 test")
+    raise SystemExit(0)
+if args[0] != "build":
+    raise SystemExit(0)
 if (pathlib.Path.cwd() / ".dev").exists(): raise SystemExit("prefix worktree unexpectedly has .dev")
 marker = os.environ.get("TOKEN_MARKER")
 if marker: pathlib.Path(marker).write_text(os.environ.get("GITHUB_TOKEN", "") + "|" + os.environ.get("GH_TOKEN", ""))
@@ -238,7 +269,7 @@ binary.chmod(0o755)
         just.chmod(0o755)
         dev = repo / ".dev"
         dev.mkdir()
-        (dev / "env").write_text("# candidate-path environment\n")
+        (dev / "env").write_text(f'export LATCHKEY_CARGO="{cargo}"\nexport LATCHKEY_PYTHON3="{sys.executable}"\n')
         (dev / "toolchain-id").write_text("rustc fixture\n")
         fp = subprocess.check_output(["bash", "-c", 'source "$1/scripts/dev/lib.sh"; lk_fingerprint',
                                       "fixture", str(trusted)], cwd=repo,
@@ -269,22 +300,18 @@ binary.chmod(0o755)
             self.assertEqual(candidate.digest(artifact.read_bytes()), prefix["artifact"]["sha256"])
         self.assertTrue((evidence / "SHA256SUMS").is_file())
         self.assertNotIn("must-not-leak", (root / "token-marker").read_text())
-        target_path = subprocess.check_output(["bash", "-c", 'source "$1/scripts/dev/lib.sh"; lk_target_dir ci',
-                                               "fixture", str(trusted)], cwd=repo,
-                                              env={**os.environ, "LK_ROOT": str(repo)}, text=True).strip()
-        self.assertEqual(Path(target_path).parent, dev / "target")
-        build_worktrees = (Path(target_path) / "fixture-cargo-builds").read_text().splitlines()
-        self.assertEqual(len(build_worktrees), 4)  # successful and expected-failure runs
-        self.assertEqual(len(set(build_worktrees)), 2)
-        reuse_log = (Path(target_path) / "dependency-built").read_text()
-        self.assertEqual(reuse_log.count("Fresh dependency build"), 1)
-        self.assertEqual(reuse_log.count("root crate recompiled"), 3)
-        suite = tools / "foundation-check"
-        suite.write_text('#!/usr/bin/env python3\nfrom pathlib import Path\nimport sys\nsys.exit(1 if len(list(Path(".changes").glob("*.toml"))) == 1 else 0)\n')
-        suite.chmod(0o755)
+        target_path = root / "candidate-ci-target"
+        prefix_logs = sorted((evidence / "artifacts").glob("*-logs"))
+        self.assertEqual(len(prefix_logs), 2)
+        first_log = (prefix_logs[0] / "script-test-dispatch.log").read_text()
+        second_log = (prefix_logs[1] / "script-test-dispatch.log").read_text()
+        self.assertIn("test_prefix_content", first_log)
+        self.assertNotIn("test_prefix_b_only", first_log)
+        self.assertIn("test_prefix_b_only", second_log)
+        self.assertEqual(len(list(target_path.iterdir())), 1)
         failed_evidence = root / "failed-evidence"
         failing_env = env.copy()
-        failing_env["FAIL_GATE"] = "fmt-check"
+        failing_env["FAIL_GATE"] = "fmt"
         failed_command = command.copy()
         failed_command[failed_command.index(str(evidence))] = str(failed_evidence)
         failed = subprocess.run(failed_command, cwd=repo, env=failing_env, capture_output=True)
