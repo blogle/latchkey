@@ -8,12 +8,20 @@ ROOT = Path(__file__).resolve().parents[3]
 class WorkflowBootstrapTests(unittest.TestCase):
     def test_pr_workflow_validates_event_inline_then_uses_trusted_release_validator(self):
         workflow = (ROOT / ".github/workflows/pr.yml").read_text()
+        self.assertNotIn("\n    if:", workflow)
         self.assertIn("Validate PR provenance inline before candidate checkout", workflow)
         self.assertIn('pr.get("head", {}).get("repo", {}).get("full_name") != repository', workflow)
         self.assertIn('pr.get("base", {}).get("ref") != "master"', workflow)
         self.assertIn('pr.get("head", {}).get("sha") != requested', workflow)
         self.assertNotIn("scripts/ci/validate_pr.py", workflow)
         self.assertIn("python3 scripts/release.py --root", workflow)
+        self.assertIn(
+            "if: ${{ !startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/') }}\n"
+            "        shell: bash\n        env:",
+            workflow,
+        )
+        self.assertIn("--working-directory \"$GITHUB_WORKSPACE/candidate\" pr-check", workflow)
+        self.assertIn("--working-directory \"$GITHUB_WORKSPACE/candidate\" test-integration contracts", workflow)
 
     def test_candidate_bootstrap_and_credentials_are_narrowly_scoped(self):
         workflow = (ROOT / ".github/workflows/candidate.yml").read_text()

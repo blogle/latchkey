@@ -11,8 +11,12 @@ base, and runs the trusted F05 fragment validator with `--root` pointing at the
 candidate checkout. After setting up the candidate's cached environment, the
 trusted justfile and cached just tool run `pr-check` and the integration
 `contracts` suite against the candidate checkout via `--working-directory` and
-`LK_ROOT`. `pr-fast` is the stable queue-admission check; queue PRs do not run
-this workflow.
+`LK_ROOT`. `pr-fast` is the stable queue-admission check and runs for ordinary
+same-repository PR heads and Mergify queue heads. Queue heads skip only the
+merge-base/one-new-fragment validation because a batch contains multiple valid
+fragments; they still run `pr-check` and `contracts` against the combined
+candidate tree. The candidate workflow independently validates each batch
+prefix and remains the final `candidate-ready` gate.
 
 ## Candidate metadata and trust boundary
 
