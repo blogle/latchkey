@@ -1,0 +1,84 @@
+name: PR fast checks
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-fast-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-fast:
+    name: pr-fast
+    if: ${{ !startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate PR provenance from trusted base
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/ci/validate_pr.py --event-only
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact candidate revision
+        env:
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git -C candidate rev-parse HEAD)" = "$REQUESTED_SHA"
+      - uses: DeterminateSystems/nix-installer-action@v23
+        with:
+          extra_nix_config: |
+            substituters = https://cache.nixos.org/ https://nix-community.cachix.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
+      - name: Validate merge base and fragment
+        shell: bash
+        env:
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          base="$(git -C candidate merge-base '${{ github.event.pull_request.base.sha }}' "$REQUESTED_SHA")"
+          if [[ -n "$(git -C candidate rev-list --merges "$base".."$REQUESTED_SHA")" ]]; then
+            echo 'PR branch contains merge commits since merge base' >&2
+            exit 1
+          fi
+          python3 scripts/release.py --root "$GITHUB_WORKSPACE/candidate" validate-fragment --base "$base"
+      - name: Materialize candidate environment with trusted setup
+        env:
+          LK_ROOT: ${{ github.workspace }}/candidate
+        run: scripts/dev/setup.sh
+      - name: Verify candidate fingerprint with trusted doctor
+        env:
+          LK_ROOT: ${{ github.workspace }}/candidate
+        run: |
+          set -euo pipefail
+          source candidate/.dev/env
+          "$LATCHKEY_JUST" --justfile "$GITHUB_WORKSPACE/justfile" --working-directory "$GITHUB_WORKSPACE/candidate" doctor
+      - name: pr-check
+        env:
+          LK_ROOT: ${{ github.workspace }}/candidate
+        run: |
+          set -euo pipefail
+          source candidate/.dev/env
+          "$LATCHKEY_JUST" --justfile "$GITHUB_WORKSPACE/justfile" --working-directory "$GITHUB_WORKSPACE/candidate" pr-check
+      - name: contracts
+        env:
+          LK_ROOT: ${{ github.workspace }}/candidate
+        run: |
+          set -euo pipefail
+          source candidate/.dev/env
+          "$LATCHKEY_JUST" --justfile "$GITHUB_WORKSPACE/justfile" --working-directory "$GITHUB_WORKSPACE/candidate" test-integration contracts
