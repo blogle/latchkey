@@ -50,11 +50,26 @@ jobs:
         run: python3 scripts/ci/validate_candidate_event.py --event-only
       - uses: Mergifyio/setup-cli@v2
         if: ${{ github.event_name == 'pull_request' }}
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact requested candidate
+        env:
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$REQUESTED_SHA"
       - name: Read authoritative ordered Mergify queue metadata
         if: ${{ github.event_name == 'pull_request' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: mergify ci queue-info > /tmp/queue-info.json
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          mergify ci queue-info > "$RUNNER_TEMP/queue-info.json"
       - name: Resolve exact PR metadata into canonical batch (trusted)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -67,20 +82,11 @@ jobs:
             printf '%s\n' "$DISPATCH_BATCH_JSON" > /tmp/dispatch-batch.json
             python3 scripts/ci/resolve_candidate_batch.py --dispatch --metadata /tmp/dispatch-batch.json --output /tmp/candidate-batch.json --requested-sha "$REQUESTED_SHA" --repository "$GITHUB_REPOSITORY"
           else
-            python3 scripts/ci/resolve_candidate_batch.py --metadata /tmp/queue-info.json --output /tmp/candidate-batch.json --requested-sha "$REQUESTED_SHA" --repository "$GITHUB_REPOSITORY"
+            python3 scripts/ci/resolve_candidate_batch.py --metadata "$RUNNER_TEMP/queue-info.json" --output /tmp/candidate-batch.json --requested-sha "$REQUESTED_SHA" --repository "$GITHUB_REPOSITORY"
           fi
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
-          path: candidate
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify exact candidate and fetch batch objects
-        env:
-          REQUESTED_SHA: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
+      - name: Fetch verified batch objects
         run: |
           set -euo pipefail
-          test "$(git -C candidate rev-parse HEAD)" = "$REQUESTED_SHA"
           python3 -c 'import json; print("\n".join(x["head_sha"] for x in json.load(open("/tmp/candidate-batch.json"))["pull_requests"]))' | while read -r sha; do git -C candidate fetch --no-tags origin "$sha"; done
           git -C candidate fetch --no-tags origin "$(python3 -c 'import json; print(json.load(open("/tmp/candidate-batch.json"))["base_sha"])')"
       - uses: DeterminateSystems/nix-installer-action@v23
