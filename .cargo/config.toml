@@ -1,0 +1,10 @@
+# Cargo configuration for the Latchkey bootstrap package.
+#
+# Deliberately minimal: the toolchain is pinned by rust-toolchain.toml and
+# handed to cargo by Nix (dev shell / crane), not by cargo configuration.
+# No vendored registries, no global RUSTFLAGS, no runner overrides.
+
+[target.x86_64-unknown-linux-musl]
+# The OCI image must ship a fully static binary, so request crt-static
+# explicitly instead of relying on the target's default.
+rustflags = ["-C", "target-feature=+crt-static"]

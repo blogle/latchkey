@@ -1,0 +1,41 @@
+[package]
+name = "latchkey"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+publish = false
+description = "Latchkey bootstrap package (the MCP gateway itself is not implemented yet)"
+
+# No [dependencies]: the bootstrap deliberately has zero external crates.
+
+# Profile contract (documented in docs/development.md). Tests always run with
+# unwinding: panic = "abort" is set only for release.
+
+[profile.dev]
+opt-level = 0
+debug = 1
+incremental = true
+codegen-units = 256
+lto = false
+
+[profile.test]
+opt-level = 0
+debug = 1
+incremental = true
+codegen-units = 256
+lto = false
+
+[profile.ci]
+inherits = "dev"
+opt-level = 1
+incremental = false
+debug = 1
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+incremental = false

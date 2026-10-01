@@ -1,0 +1,11 @@
+# Local build state (never committed)
+/target/
+/result
+/result-*
+*.log
+
+# Marker written by `just setup`; holds the toolchain/lock fingerprint
+/.setup-marker
+
+# Local tooling state
+.direnv/
