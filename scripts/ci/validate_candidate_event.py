@@ -47,15 +47,23 @@ def validate(event: dict, environ: dict[str, str], checkout_sha: str | None = No
         reject("dispatch requested SHA differs from validated SHA")
     inputs = event.get("inputs", {})
     try:
-        heads = json.loads(inputs.get("ordered_heads", ""))
+        batch = json.loads(inputs.get("batch_json", ""))
     except (TypeError, json.JSONDecodeError):
-        reject("dispatch ordered_heads must be a JSON array")
-    if (not isinstance(heads, list) or not 1 <= len(heads) <= 3
-            or any(not isinstance(sha, str) or not SHA.fullmatch(sha) for sha in heads)
-            or len(set(heads)) != len(heads)):
-        reject("dispatch ordered_heads must contain one to three unique full SHAs")
-    if not SHA.fullmatch(inputs.get("base_sha", "")) or not heads:
-        reject("dispatch requires exact base_sha and non-empty ordered_heads")
+        reject("dispatch batch_json must be a JSON object")
+    if not isinstance(batch, dict) or set(batch) != {"base_sha", "requested_tree", "pull_requests"}:
+        reject("dispatch batch_json must contain exact base_sha, requested_tree and pull_requests fields")
+    prs = batch.get("pull_requests")
+    if not isinstance(prs, list) or not 1 <= len(prs) <= 3:
+        reject("dispatch requires one to three ordered PR records")
+    numbers = []
+    for pr in prs:
+        if (not isinstance(pr, dict) or set(pr) != {"number", "head_sha", "base_sha"}
+                or not isinstance(pr["number"], int) or pr["number"] <= 0
+                or any(not isinstance(pr.get(key), str) or not SHA.fullmatch(pr[key]) for key in ("head_sha", "base_sha"))):
+            reject("dispatch contains an invalid exact PR record")
+        numbers.append(pr["number"])
+    if len(set(numbers)) != len(numbers) or any(not SHA.fullmatch(batch.get(key, "")) for key in ("base_sha", "requested_tree")):
+        reject("dispatch requires unique PR numbers and exact full base/tree SHAs")
     # A repository variable contains exact trusted GitHub usernames; a blank
     # or malformed allow-list intentionally disables manual dispatch.
     trusted = {actor.strip() for actor in environ.get("TRUSTED_DISPATCH_ACTORS", "").split(",") if actor.strip()}

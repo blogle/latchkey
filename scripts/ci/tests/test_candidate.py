@@ -3,6 +3,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -104,8 +105,15 @@ class CandidateTests(unittest.TestCase):
     def test_cache_reuse_and_lock_change_invalidation(self):
         key = candidate.cache_key(TREE, "lock-1", "rust-1.96", "default", "ci", "0.0.1")
         self.assertEqual(key, candidate.cache_key(TREE, "lock-1", "rust-1.96", "default", "ci", "0.0.1"))
-        self.assertNotEqual(key, candidate.cache_key(TREE, "lock-2", "rust-1.96", "default", "ci", "0.0.1"))
-        self.assertNotEqual(key, candidate.cache_key(TREE, "lock-1", "rust-1.96", "default", "ci", "0.0.2"))
+        for dimensions in [("e" * 40, "lock-1", "rust-1.96", "default", "ci", "0.0.1"),
+                           (TREE, "lock-2", "rust-1.96", "default", "ci", "0.0.1"),
+                           (TREE, "lock-1", "rust-1.97", "default", "ci", "0.0.1"),
+                           (TREE, "lock-1", "rust-1.96", "features-x", "ci", "0.0.1"),
+                           (TREE, "lock-1", "rust-1.96", "default", "release", "0.0.1"),
+                           (TREE, "lock-1", "rust-1.96", "default", "ci", "0.0.2")]:
+            self.assertNotEqual(key, candidate.cache_key(*dimensions))
+        self.assertNotEqual(candidate.cache_key(TREE, "lock-1", "rust-1.96", "default", "ci", "0.0.1,0.0.2"),
+                            candidate.cache_key(TREE, "lock-1", "rust-1.96", "default", "ci", "0.0.2,0.0.1"))
 
     def test_real_git_batch_reconstructs_two_ordered_prefixes(self):
         temp, repo, base, a, b, tree = self._repo()
@@ -132,8 +140,10 @@ class CandidateTests(unittest.TestCase):
             candidate.validate_batch(base, tree, [a, b], evidence)
 
     def test_manual_dispatch_is_allowlisted_and_exact(self):
+        batch = {"base_sha": SHA_B, "requested_tree": TREE,
+                 "pull_requests": [{"number": 1, "head_sha": SHA_A, "base_sha": SHA_B}]}
         event = {"repository": {"full_name": "blogle/latchkey"}, "inputs": {
-            "requested_sha": SHA_A, "ordered_heads": f'["{SHA_A}"]', "base_sha": SHA_B}}
+            "requested_sha": SHA_A, "batch_json": json.dumps(batch)}}
         env = {"GITHUB_REPOSITORY": "blogle/latchkey", "REQUESTED_SHA": SHA_A,
                "EVENT_NAME": "workflow_dispatch", "EVENT_REF": "refs/heads/master",
                "GITHUB_ACTOR": "trusted", "TRUSTED_DISPATCH_ACTORS": "trusted"}
@@ -141,6 +151,94 @@ class CandidateTests(unittest.TestCase):
         env["GITHUB_ACTOR"] = "untrusted"
         with self.assertRaisesRegex(ValueError, "actor"):
             validate_event(event, env, SHA_A)
+
+    def test_cli_executes_two_independent_prefixes_and_writes_hashed_evidence(self):
+        temp = tempfile.TemporaryDirectory(prefix="candidate-cli-")
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        repo = root / "repo"
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=repo, check=True, text=True,
+                                  capture_output=True).stdout.strip()
+        git("init", "-q")
+        git("config", "user.name", "fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        (repo / "Cargo.toml").write_text('[package]\nname = "latchkey"\nversion = "0.1.0"\nedition = "2024"\n')
+        (repo / "Cargo.lock").write_text('version = 4\n\n[[package]]\nname = "latchkey"\nversion = "0.1.0"\n')
+        (repo / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.96.0"\n')
+        (repo / ".changes").mkdir()
+        (repo / "scripts/ci").mkdir(parents=True)
+        (repo / "ci").mkdir()
+        shutil = __import__("shutil")
+        shutil.copy(ROOT / "scripts/ci/candidate.py", repo / "scripts/ci/candidate.py")
+        shutil.copy(ROOT / "scripts/ci/inject_root_version.py", repo / "scripts/ci/inject_root_version.py")
+        (repo / "ci/capabilities.toml").write_text('[[stages]]\nid="foundation"\ngates=[{command="just noop"}]\n')
+        (repo / "scripts/release.py").write_text('''import json, subprocess, sys
+commit = sys.argv[sys.argv.index("--commit") + 1]
+tree = subprocess.check_output(["git", "rev-parse", commit + "^{tree}"], text=True).strip()
+files = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", commit, "--", ".changes"], text=True).splitlines()
+print(json.dumps({"tree": tree, "version": f"1.2.{len(files)}"}))
+''')
+        git("add", ".")
+        git("commit", "-qm", "base")
+        base = git("rev-parse", "HEAD")
+        heads = []
+        for filename in ("LATCH-1.toml", "LATCH-2.toml"):
+            (repo / ".changes" / filename).write_text('category = "Added"\nsummary = "fixture"\n')
+            git("add", ".")
+            git("commit", "-qm", filename)
+            heads.append(git("rev-parse", "HEAD"))
+        tree = git("rev-parse", "HEAD^{tree}")
+        batch = root / "batch.json"
+        batch.write_text(json.dumps({"schema":"latchkey-candidate-batch/v1", "base_sha":base,
+            "requested_tree":tree,"pull_requests":[{"number":1,"head_sha":heads[0],"base_sha":base},
+                {"number":2,"head_sha":heads[1],"base_sha":heads[0]}]}))
+        tools = root / "tools"
+        tools.mkdir()
+        cargo = tools / "cargo"
+        cargo.write_text('#!/usr/bin/env python3\nimport os,pathlib,re\nv=re.search(r\'version = "([^\"]+)"\',pathlib.Path("Cargo.toml").read_text()).group(1)\np=pathlib.Path(os.environ["CARGO_TARGET_DIR"])/"ci/latchkey"\np.parent.mkdir(parents=True,exist_ok=True)\np.write_text("#!/bin/sh\\nif [ \\"$1\\" = --version ]; then echo latchkey '+"' + v + '"+'; else echo help; fi\\n")\np.chmod(0o755)\n')
+        cargo.chmod(0o755)
+        cargo.write_text('''#!/usr/bin/env python3
+import os, pathlib, re
+version = re.search(r'version = "([^"]+)"', pathlib.Path("Cargo.toml").read_text()).group(1)
+binary = pathlib.Path(os.environ["CARGO_TARGET_DIR"]) / "ci/latchkey"
+binary.parent.mkdir(parents=True, exist_ok=True)
+binary.write_text("#!/bin/sh\\nif [ \\"$1\\" = --version ]; then echo latchkey " + version + "; else echo help; fi\\n")
+binary.chmod(0o755)
+''')
+        cargo.chmod(0o755)
+        just = tools / "just"
+        just.write_text('#!/bin/sh\nexit 0\n')
+        just.chmod(0o755)
+        evidence = root / "candidate-evidence"
+        env = os.environ.copy()
+        env.update({"PATH": f"{tools}:{env['PATH']}", "CANDIDATE_TEST_SUITES":"[\"just noop\"]",
+                    "GITHUB_RUN_ID":"42"})
+        command = [sys.executable, str(repo / "scripts/ci/candidate.py"), "run", "--repository", str(repo),
+                   "--source", str(repo), "--batch", str(batch), "--requested-sha", heads[-1],
+                   "--target-dir", str(root / "target"), "--evidence", str(evidence)]
+        subprocess.run(command, cwd=repo, env=env, check=True)
+        manifest = json.loads((evidence / "manifest.json").read_text())
+        versions = [p["release_version"] for p in manifest["ordered_prs"]]
+        self.assertTrue(all(version.startswith("1.2.") for version in versions))
+        self.assertNotEqual(versions[0], versions[1])
+        self.assertEqual([p["head_sha"] for p in manifest["ordered_prs"]], heads)
+        for prefix in manifest["ordered_prs"]:
+            artifact = evidence / prefix["artifact"]["filename"]
+            self.assertEqual(candidate.digest(artifact.read_bytes()), prefix["artifact"]["sha256"])
+        self.assertTrue((evidence / "SHA256SUMS").is_file())
+        suite = tools / "foundation-check"
+        suite.write_text('#!/usr/bin/env python3\nfrom pathlib import Path\nimport sys\nsys.exit(1 if len(list(Path(".changes").glob("*.toml"))) == 1 else 0)\n')
+        suite.chmod(0o755)
+        failed_evidence = root / "failed-evidence"
+        failing_env = env.copy()
+        failing_env["CANDIDATE_TEST_SUITES"] = '["foundation-check"]'
+        failed_command = command.copy()
+        failed_command[failed_command.index(str(evidence))] = str(failed_evidence)
+        failed = subprocess.run(failed_command, cwd=repo, env=failing_env, capture_output=True)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertFalse((failed_evidence / "manifest.json").exists())
 
 
 if __name__ == "__main__":

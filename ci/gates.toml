@@ -12,12 +12,12 @@ require_all_prefixes = true
 require_final_tree_match = true
 fail_on_missing_batch_metadata = true
 artifact_checksums = "sha256"
-artifact_download = "not implemented: F07 contract pending"
+artifact_download = "successful candidate-ready run by repository/workflow/SHA; verify candidate-evidence/manifest.json and SHA256SUMS"
 provenance_separate_from_content_derivation = true
 
 [[stages]]
 id = "foundation"
-active_suites = ["bootstrap-binary"]
+active_suites = ["ci/capabilities.toml:foundation.gates"]
 
 [[stages]]
 id = "standalone"

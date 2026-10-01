@@ -16,6 +16,8 @@ import subprocess
 import argparse
 import sys
 import tempfile
+import shutil
+import tomllib
 from typing import Any
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -88,8 +90,208 @@ def manifest(*, heads: list[str], base: str, tree: str, lock: str, toolchain: st
     }
 
 
+def _run(command: list[str], *, cwd: str, env: dict[str, str] | None = None) -> bytes:
+    proc = subprocess.run(command, cwd=cwd, env=env, capture_output=True)
+    if proc.returncode:
+        raise ValueError(f"candidate command failed ({proc.returncode}): {command[0]}")
+    return proc.stdout
+
+
+def _sha(repo: str, ref: str) -> str:
+    return _commit(repo, ref)
+
+
+def _capability_suites(source: str) -> list[str]:
+    override = os.environ.get("CANDIDATE_TEST_SUITES")
+    if override:
+        return json.loads(override)
+    data = tomllib.loads((__import__("pathlib").Path(source) / "ci/capabilities.toml").read_text())
+    stages = {stage["id"]: stage for stage in data["stages"]}
+    stage = stages.get("foundation")
+    if not stage or not stage.get("gates"):
+        raise ValueError("capabilities.toml has no active foundation suite")
+    return [gate["command"] for gate in stage["gates"]]
+
+
+def execute(args: argparse.Namespace) -> None:
+    source = os.path.realpath(args.source)
+    repository = os.path.realpath(args.repository)
+    batch = json.loads(open(args.batch, encoding="utf-8").read())
+    if set(batch) != {"schema", "base_sha", "requested_tree", "pull_requests"} or batch["schema"] != "latchkey-candidate-batch/v1":
+        raise ValueError("batch must be canonical latchkey-candidate-batch/v1")
+    prs = batch["pull_requests"]
+    if not isinstance(prs, list) or not 1 <= len(prs) <= MAX_BATCH:
+        raise ValueError("batch requires one to three ordered PR records")
+    for pr in prs:
+        if (not isinstance(pr, dict) or set(pr) != {"number", "head_sha", "base_sha"}
+                or not isinstance(pr["number"], int) or pr["number"] <= 0
+                or any(not isinstance(pr[k], str) or not SHA.fullmatch(pr[k]) for k in ("head_sha", "base_sha"))):
+            raise ValueError("invalid PR record in canonical batch")
+    if len({pr["number"] for pr in prs}) != len(prs) or len({pr["head_sha"] for pr in prs}) != len(prs):
+        raise ValueError("duplicate PR number or head SHA in ordered batch")
+    base, requested_tree = batch["base_sha"], batch["requested_tree"]
+    if not SHA.fullmatch(base) or not SHA.fullmatch(requested_tree):
+        raise ValueError("batch base/tree must be full SHA-1 identifiers")
+    if _sha(source, "HEAD") != args.requested_sha:
+        raise ValueError("candidate checkout differs from exact requested SHA")
+    if git(source, "rev-parse", "HEAD^{tree}").decode().strip() != requested_tree:
+        raise ValueError("requested Mergify candidate tree differs from batch tree")
+    # Reconstruct using the candidate repository object database. The workflow
+    # fetches exact PR heads into this checkout after trusted metadata resolution.
+    prefixes = reconstruct_prefixes(source, base, prs, requested_tree)
+    lock_fingerprint = digest((__import__("pathlib").Path(source) / "Cargo.lock").read_bytes())
+    toolchain_file = (__import__("pathlib").Path(source) / "rust-toolchain.toml").read_bytes()
+    toolchain = digest(toolchain_file)
+    features = digest(b"--locked --offline --no-default-features;features=default")
+    profile = "ci"
+    suites = _capability_suites(source)
+    evidence_dir = __import__("pathlib").Path(args.evidence).resolve()
+    artifacts_dir = evidence_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    target = os.path.realpath(args.target_dir)
+    target_identity = digest("\0".join((lock_fingerprint, toolchain, features, profile,
+                                         os.environ.get("CARGO_BUILD_TARGET", "host"))).encode())
+    target = os.path.join(target, target_identity)
+    all_prefixes: list[dict[str, Any]] = []
+    all_passed = True
+    for index, prefix in enumerate(prefixes, 1):
+        worktree = tempfile.mkdtemp(prefix="latchkey-prefix-")
+        try:
+            git(source, "worktree", "add", "--detach", worktree, prefix["commit"])
+            dev_env = os.path.join(source, ".dev")
+            if os.path.isdir(dev_env):
+                os.symlink(dev_env, os.path.join(worktree, ".dev"), target_is_directory=True)
+            plan_cmd = [sys.executable, os.environ.get("CANDIDATE_PLANNER", os.path.join(source, "scripts/release.py")), "plan",
+                        "--commit", prefix["commit"], "--json"]
+            plan_data = json.loads(_run(plan_cmd, cwd=source))
+            version = plan_data.get("version")
+            if plan_data.get("tree") != prefix["tree"] or not re.fullmatch(r"\d+\.\d+\.\d+", str(version)):
+                raise ValueError("release planner returned invalid prefix tree/version")
+            _run([sys.executable, os.path.join(source, "scripts/ci/inject_root_version.py"), worktree, version], cwd=source)
+            env = os.environ.copy()
+            env.pop("GITHUB_TOKEN", None)
+            env.pop("GH_TOKEN", None)
+            env.pop("GITHUB_READ_TOKEN", None)
+            env["CARGO_TARGET_DIR"] = target
+            env["CARGO_NET_OFFLINE"] = "true"
+            env["CARGO_PROFILE"] = profile
+            _run(["cargo", "build", "--locked", "--offline", "--profile", profile, "--bin", "latchkey"], cwd=worktree, env=env)
+            binary = __import__("pathlib").Path(target) / profile / "latchkey"
+            if not binary.is_file():
+                raise ValueError("cargo build did not produce expected root binary")
+            actual_version = _run([str(binary), "--version"], cwd=worktree).decode().strip()
+            expected_version = f"latchkey {version}"
+            if actual_version != expected_version:
+                raise ValueError(f"versioned binary --version mismatch ({actual_version!r}, expected {expected_version!r})")
+            _run([str(binary), "--help"], cwd=worktree)
+            suite_results = []
+            for suite in suites:
+                command = suite.split()
+                proc = subprocess.run(command, cwd=worktree, env=env, capture_output=True)
+                suite_results.append({"command": suite, "result": "passed" if proc.returncode == 0 else "failed"})
+                if proc.returncode:
+                    all_passed = False
+            name = f"prefix-{index}-{version}-{prefix['tree'][:12]}"
+            artifact_path = artifacts_dir / name
+            shutil.copy2(binary, artifact_path)
+            artifact_hash = digest(artifact_path.read_bytes())
+            all_prefixes.append({"number": prs[index - 1]["number"], "head_sha": prefix["head_sha"],
+                                 "synthetic_sha": prefix["commit"], "tree": prefix["tree"],
+                                 "release_version": version, "suite_results": suite_results,
+                                 "artifact": {"filename": f"artifacts/{name}", "sha256": artifact_hash},
+                                 "result": "passed" if all(r["result"] == "passed" for r in suite_results) else "failed"})
+        except Exception:
+            all_passed = False
+            raise
+        finally:
+            subprocess.run(["git", "worktree", "remove", "--force", worktree], cwd=source, capture_output=True)
+    # One full final candidate gate, never repeated for each prefix.
+    if all_passed:
+        final_env = os.environ.copy()
+        for key in ("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_READ_TOKEN"):
+            final_env.pop(key, None)
+        _run(["just", "candidate-check"], cwd=source, env=final_env)
+    content_material = "\0".join([requested_tree, lock_fingerprint, toolchain, features, profile,
+                                    ",".join(p["release_version"] for p in all_prefixes)])
+    artifact_name = "latchkey-candidate-" + digest(content_material.encode())[:32]
+    result = "passed" if all_passed else "failed"
+    document = {"schema": "latchkey-candidate-evidence/v1", "ordered_prs": all_prefixes,
+                "base_sha": base, "candidate_sha": args.requested_sha, "candidate_tree": requested_tree,
+                "fingerprints": {"cargo_lock_sha256": lock_fingerprint, "toolchain_sha256": toolchain,
+                                 "profile": profile, "features_sha256": features},
+                "artifact_name": artifact_name, "final_result": result,
+                "provenance": {"workflow_run_id": os.environ.get("GITHUB_RUN_ID", "local"),
+                               "git_commit_metadata_in_content_derivation": False}}
+    if result == "passed":
+        if len(all_prefixes) != len(prs) or any(p["result"] != "passed" for p in all_prefixes):
+            raise ValueError("manifest prefix validation failed")
+        manifest_path = evidence_dir / "manifest.json"
+        validate_evidence(document, evidence_dir, prs, suites)
+        if all_prefixes[-1]["tree"] != requested_tree:
+            raise ValueError("manifest final prefix tree differs from requested candidate tree")
+        manifest_path.write_bytes(canonical_json(document))
+        sums = []
+        for path in sorted(artifacts_dir.iterdir()):
+            if path.is_file():
+                sums.append(f"{digest(path.read_bytes())}  artifacts/{path.name}")
+        (evidence_dir / "SHA256SUMS").write_text("\n".join(sums) + "\n", encoding="utf-8")
+    else:
+        raise ValueError("a candidate prefix failed; no successful evidence produced")
+
+
+def print_cache_key(args: argparse.Namespace) -> None:
+    source = os.path.realpath(args.source)
+    batch = json.loads(open(args.batch, encoding="utf-8").read())
+    if set(batch) != {"schema", "base_sha", "requested_tree", "pull_requests"} or batch["schema"] != "latchkey-candidate-batch/v1":
+        raise ValueError("batch must be canonical latchkey-candidate-batch/v1")
+    prefixes = reconstruct_prefixes(source, batch["base_sha"], batch["pull_requests"], batch["requested_tree"])
+    versions = []
+    for prefix in prefixes:
+        plan = json.loads(_run([sys.executable, os.environ.get("CANDIDATE_PLANNER", os.path.join(source, "scripts/release.py")),
+                               "plan", "--commit", prefix["commit"], "--json"], cwd=source))
+        if plan.get("tree") != prefix["tree"] or not re.fullmatch(r"\d+\.\d+\.\d+", str(plan.get("version"))):
+            raise ValueError("release planner returned invalid prefix tree/version")
+        versions.append(plan["version"])
+    lock = digest((__import__("pathlib").Path(source) / "Cargo.lock").read_bytes())
+    toolchain = digest((__import__("pathlib").Path(source) / "rust-toolchain.toml").read_bytes())
+    features = digest(b"--locked --offline --no-default-features;features=default")
+    print(cache_key(batch["requested_tree"], lock, toolchain, features, "ci", ",".join(versions)))
+
+
 def canonical_json(value: dict[str, Any]) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def validate_evidence(document: dict[str, Any], evidence_dir: Any,
+                      pull_requests: list[dict[str, Any]], suites: list[str]) -> None:
+    if document.get("schema") != "latchkey-candidate-evidence/v1" or document.get("final_result") != "passed":
+        raise ValueError("evidence schema/final result is invalid")
+    for key in ("base_sha", "candidate_sha", "candidate_tree"):
+        if not SHA.fullmatch(document.get(key, "")):
+            raise ValueError(f"evidence {key} is invalid")
+    prefixes = document.get("ordered_prs")
+    if not isinstance(prefixes, list) or len(prefixes) != len(pull_requests):
+        raise ValueError("evidence prefix count differs from batch")
+    for record, requested in zip(prefixes, pull_requests, strict=True):
+        artifact = record.get("artifact", {})
+        path = (evidence_dir / artifact.get("filename", "")).resolve()
+        if (record.get("number") != requested["number"] or record.get("head_sha") != requested["head_sha"]
+                or not SHA.fullmatch(record.get("synthetic_sha", ""))
+                or not SHA.fullmatch(record.get("tree", ""))
+                or not re.fullmatch(r"\d+\.\d+\.\d+", record.get("release_version", ""))
+                or record.get("result") != "passed" or not record.get("suite_results")
+                or [row.get("command") for row in record["suite_results"]] != suites
+                or any(row.get("result") != "passed" for row in record["suite_results"])
+                or not path.is_file() or path.parent != (evidence_dir / "artifacts").resolve()
+                or not re.fullmatch(r"[0-9a-f]{64}", artifact.get("sha256", ""))
+                or digest(path.read_bytes()) != artifact["sha256"]):
+            raise ValueError("candidate evidence prefix/artifact validation failed")
+    fingerprints = document.get("fingerprints", {})
+    for key in ("cargo_lock_sha256", "toolchain_sha256", "features_sha256"):
+        if not re.fullmatch(r"[0-9a-f]{64}", fingerprints.get(key, "")):
+            raise ValueError("candidate evidence fingerprint is invalid")
+    if fingerprints.get("profile") != "ci" or not document.get("artifact_name"):
+        raise ValueError("candidate evidence profile/artifact name is missing")
 
 
 def git(repo: str, *args: str, input: bytes | None = None) -> bytes:
@@ -178,11 +380,24 @@ def main() -> int:
     run = subparsers.add_parser("run", help="run the candidate evidence pipeline")
     run.add_argument("--repository", required=True)
     run.add_argument("--source", required=True)
-    run.parse_args()
-    print("candidate pipeline unavailable: ordered PR API resolution, per-prefix F05 planning, "
-          "version-injected builds, suite execution, manifest and artifact upload are not implemented",
-          file=sys.stderr)
-    return 1
+    run.add_argument("--batch", required=True)
+    run.add_argument("--requested-sha", required=True)
+    run.add_argument("--target-dir", required=True)
+    run.add_argument("--evidence", default="candidate-evidence")
+    key = subparsers.add_parser("cache-key", help="derive the exact immutable candidate target cache key")
+    key.add_argument("--repository", required=True)
+    key.add_argument("--source", required=True)
+    key.add_argument("--batch", required=True)
+    args = parser.parse_args()
+    try:
+        if args.command == "run":
+            execute(args)
+        else:
+            print_cache_key(args)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError, subprocess.CalledProcessError) as exc:
+        print(f"candidate execution failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
