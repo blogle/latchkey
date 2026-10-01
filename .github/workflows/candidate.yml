@@ -1,0 +1,204 @@
+name: Merge candidate
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      requested_sha:
+        description: Exact candidate commit SHA to validate
+        required: true
+        type: string
+      batch_json:
+        description: Exact JSON batch with base_sha, requested_tree, and ordered pull_requests [{number,head_sha,base_sha}]
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: candidate-${{ github.event.pull_request.head.sha || inputs.requested_sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  candidate-ready:
+    name: candidate-ready
+    if: >-
+      (github.event_name == 'pull_request' && startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/')) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha || 'master' }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate event inline before candidate checkout
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
+          TRUSTED_DISPATCH_ACTORS: ${{ vars.LATCHKEY_CI_TRUSTED_DISPATCH_ACTORS }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+
+          def reject(message):
+              raise SystemExit(message)
+
+          event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+          repository = os.environ["GITHUB_REPOSITORY"]
+          requested = os.environ["REQUESTED_SHA"]
+          if event.get("repository", {}).get("full_name") != repository:
+              reject("event repository does not match workflow repository")
+          if not re.fullmatch(r"[0-9a-f]{40}", requested):
+              reject("requested candidate SHA must be a full commit SHA")
+          if os.environ["EVENT_NAME"] == "pull_request":
+              pr = event.get("pull_request", {})
+              if pr.get("head", {}).get("repo", {}).get("full_name") != repository:
+                  reject("only same-repository queue pull requests are accepted")
+              if pr.get("head", {}).get("sha") != requested:
+                  reject("queue pull request head does not match requested SHA")
+              if pr.get("base", {}).get("ref") != "master":
+                  reject("queue pull request target must be master")
+              if not str(pr.get("head", {}).get("ref", "")).startswith("mergify/merge-queue/"):
+                  reject("pull request is not on the Mergify merge-queue ref")
+              if pr.get("user", {}).get("login") != "mergify[bot]":
+                  reject("queue pull request author is not the Mergify GitHub App")
+          elif os.environ["EVENT_NAME"] == "workflow_dispatch":
+              if os.environ["EVENT_REF"] != "refs/heads/master":
+                  reject("manual candidate dispatch must run from master")
+              trusted = {actor.strip() for actor in os.environ.get("TRUSTED_DISPATCH_ACTORS", "").split(",") if actor.strip()}
+              if not os.environ.get("GITHUB_ACTOR") or os.environ["GITHUB_ACTOR"] not in trusted:
+                  reject("manual candidate dispatch actor is not allowlisted")
+              inputs = event.get("inputs", {})
+              if inputs.get("requested_sha") != requested:
+                  reject("dispatch requested_sha does not match the requested SHA")
+              try:
+                  batch = json.loads(inputs["batch_json"])
+              except (KeyError, TypeError, json.JSONDecodeError):
+                  reject("dispatch batch_json must be valid JSON")
+              if not isinstance(batch, dict) or set(batch) != {"base_sha", "requested_tree", "pull_requests"}:
+                  reject("dispatch batch_json has unexpected fields")
+              if not re.fullmatch(r"[0-9a-f]{40}", str(batch["base_sha"])) or not re.fullmatch(r"[0-9a-f]{40}", str(batch["requested_tree"])):
+                  reject("dispatch batch base and requested tree must be full SHA identifiers")
+              prs = batch["pull_requests"]
+              if not isinstance(prs, list) or not 1 <= len(prs) <= 3:
+                  reject("dispatch batch must contain one to three ordered pull requests")
+              seen = set()
+              for row in prs:
+                  if (not isinstance(row, dict) or set(row) != {"number", "head_sha", "base_sha"}
+                          or not isinstance(row["number"], int) or row["number"] <= 0
+                          or row["number"] in seen
+                          or any(not isinstance(row[key], str) or not re.fullmatch(r"[0-9a-f]{40}", row[key])
+                                 for key in ("head_sha", "base_sha"))):
+                      reject("dispatch batch contains an invalid ordered pull request")
+                  seen.add(row["number"])
+              if prs[-1]["head_sha"] != requested:
+                  reject("dispatch batch final head does not match requested SHA")
+          else:
+              reject("unsupported candidate workflow event")
+          PY
+      - uses: Mergifyio/setup-cli@v1.3.0
+        if: ${{ github.event_name == 'pull_request' }}
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact requested candidate
+        env:
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$REQUESTED_SHA"
+      - name: Read authoritative ordered Mergify queue metadata
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          mergify ci queue-info > "$RUNNER_TEMP/queue-info.json"
+      - name: Resolve exact PR metadata into canonical batch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_BATCH_JSON: ${{ inputs.batch_json }}
+        run: |
+          set -euo pipefail
+          resolver="$GITHUB_WORKSPACE/scripts/ci/resolve_candidate_batch.py"
+          if [[ ! -f "$resolver" ]]; then
+            resolver="$GITHUB_WORKSPACE/candidate/scripts/ci/resolve_candidate_batch.py"
+          fi
+          test -f "$resolver"
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            printf '%s\n' "$DISPATCH_BATCH_JSON" > /tmp/dispatch-batch.json
+            python3 "$resolver" --dispatch --metadata /tmp/dispatch-batch.json --output /tmp/candidate-batch.json --requested-sha "$REQUESTED_SHA" --repository "$GITHUB_REPOSITORY"
+          else
+            python3 "$resolver" --metadata "$RUNNER_TEMP/queue-info.json" --output /tmp/candidate-batch.json --requested-sha "$REQUESTED_SHA" --repository "$GITHUB_REPOSITORY"
+          fi
+      - name: Fetch verified batch objects
+        run: |
+          set -euo pipefail
+          python3 -c 'import json; print("\n".join(x["head_sha"] for x in json.load(open("/tmp/candidate-batch.json"))["pull_requests"]))' | while read -r sha; do git -C candidate fetch --no-tags origin "$sha"; done
+          git -C candidate fetch --no-tags origin "$(python3 -c 'import json; print(json.load(open("/tmp/candidate-batch.json"))["base_sha"])')"
+      - uses: DeterminateSystems/nix-installer-action@v23
+        with:
+          extra_nix_config: |
+            substituters = https://cache.nixos.org/ https://nix-community.cachix.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
+      - name: Materialize candidate environment with trusted setup
+        env:
+          LK_ROOT: ${{ github.workspace }}/candidate
+        run: scripts/dev/setup.sh
+      - name: Verify candidate fingerprint with trusted doctor
+        env:
+          LK_ROOT: ${{ github.workspace }}/candidate
+        run: |
+          set -euo pipefail
+          source candidate/.dev/env
+          "$LATCHKEY_JUST" --justfile "$GITHUB_WORKSPACE/justfile" --working-directory "$GITHUB_WORKSPACE/candidate" doctor
+      - name: Derive exact candidate cache identity
+        id: target-cache-key
+        run: |
+          candidate_script="$GITHUB_WORKSPACE/scripts/ci/candidate.py"
+          if [[ ! -f "$candidate_script" ]]; then candidate_script="$GITHUB_WORKSPACE/candidate/scripts/ci/candidate.py"; fi
+          key="$(python3 "$candidate_script" cache-key --trusted "$GITHUB_WORKSPACE" --repository "$GITHUB_WORKSPACE/candidate" --source "$GITHUB_WORKSPACE/candidate" --batch /tmp/candidate-batch.json)"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: candidate-ci-target
+          key: ${{ steps.target-cache-key.outputs.key }}
+      - name: Reconstruct, plan and validate every prefix
+        env:
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
+          LK_ROOT: ${{ github.workspace }}/candidate
+        run: |
+          set -euo pipefail
+          source candidate/.dev/env
+          candidate_script="$GITHUB_WORKSPACE/scripts/ci/candidate.py"
+          if [[ ! -f "$candidate_script" ]]; then candidate_script="$GITHUB_WORKSPACE/candidate/scripts/ci/candidate.py"; fi
+          "$LATCHKEY_PYTHON3" "$candidate_script" run --trusted "$GITHUB_WORKSPACE" --repository "$GITHUB_WORKSPACE/candidate" --source "$GITHUB_WORKSPACE/candidate" --batch /tmp/candidate-batch.json --requested-sha "$REQUESTED_SHA"
+      - name: Read deterministic evidence artifact name
+        id: evidence
+        run: echo "artifact_name=$(python3 -c 'import json; print(json.load(open("candidate/candidate-evidence/manifest.json"))["artifact_name"])')" >> "$GITHUB_OUTPUT"
+      - name: Upload verified successful candidate evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.evidence.outputs.artifact_name }}
+          path: candidate/candidate-evidence/{manifest.json,SHA256SUMS,artifacts/*}
+          if-no-files-found: error
+          retention-days: 90
