@@ -1,3 +1,25 @@
+# Latchkey workspace manifest (LATCH-2 / F02 freezes the dependency set).
+#
+# One production package (`latchkey`: lib + binary) plus one workspace
+# test-support package used only by tests. Every direct dependency below is
+# pinned to an exact, mutually compatible version; Cargo.lock resolves the
+# transitive graph once and must keep building on the pinned Rust 1.96.0
+# toolchain. The full frozen list, with the rationale for each pin and for
+# every feature selection, is recorded in docs/contracts.md.
+#
+# Dependency policy (LATCH-2): only the crates named by the frozen interfaces
+# (plus those those interfaces cannot function without) are direct
+# dependencies. No native-TLS/OpenSSL anywhere: reqwest and kube both run on
+# rustls with the `ring` provider (aws-lc is deliberately never enabled so
+# the static musl OCI build needs nothing beyond `cc`). No OAuth and no stdio
+# transport features on rmcp.
+
+[workspace]
+members = ["crates/test-support"]
+# Resolver 3 (edition 2024): MSRV-aware version selection against the
+# `rust-version = "1.96"` declared by both packages.
+resolver = "3"
+
 [package]
 name = "latchkey"
 version = "0.0.0"
@@ -7,7 +29,83 @@ license = "MIT"
 publish = false
 description = "Latchkey bootstrap package (the MCP gateway itself is not implemented yet)"
 
-# No [dependencies]: the bootstrap deliberately has zero external crates.
+[dependencies]
+# MCP SDK (official framing, server + client, Streamable HTTP both ways).
+# Explicitly NOT enabled: `auth`/`auth-client-credentials-jwt` (OAuth),
+# `transport-child-process`/`transport-io` (stdio supervision).
+rmcp = { version = "=3.0.1", default-features = false, features = [
+    "server",
+    "client",
+    "macros",
+    "transport-streamable-http-server",
+    "transport-streamable-http-client-reqwest",
+] }
+
+# Async runtime and utilities: watch channels (config snapshots), task
+# tracking/JoinMap (reconciler), cancellation tokens (portable cancellation).
+tokio = { version = "=1.53.1", features = [
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "net",
+    "signal",
+    "io-util",
+] }
+tokio-util = { version = "=0.7.19", features = ["rt"] }
+
+# Health/readiness endpoints and MCP HTTP mounting (Streamable HTTP service).
+# http2 added on top of the axum 0.8 defaults so ingress h2 traffic works.
+axum = { version = "=0.8.9", features = ["http2"] }
+
+# Downstream HTTP client used by the SDK transport. default-features are off
+# so neither native-tls nor a bundled crypto provider is selected here; the
+# TLS stack is rustls + ring (pinned below).
+reqwest = { version = "=0.13.5", default-features = false, features = [
+    "rustls-no-provider",
+] }
+
+# Serialization for domain types, JSON-RPC payloads, and local configuration.
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+# JSON Schema generation for the gateway's own `search`/`exec` tool inputs.
+schemars = "=1.2.2"
+
+# Atomic catalog publication (ConfigSnapshot -> Arc<CatalogSnapshot> swaps)
+# and object-safe async ports.
+arc-swap = "=1.9.2"
+async-trait = "=0.1.92"
+
+# Kubernetes mode only (CRD watch/source/status); standalone mode never
+# initializes a client. rustls + ring via kube's `ring` default feature.
+kube = { version = "=4.2.0", features = ["derive", "runtime"] }
+k8s-openapi = { version = "=0.28.0", features = ["latest"] }
+
+# Observability: named spans, structured JSON logs, OTLP trace/metric export.
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["json", "env-filter"] }
+opentelemetry = { version = "=0.33.0", features = ["trace", "metrics", "logs"] }
+opentelemetry_sdk = "=0.33.0"
+opentelemetry-otlp = "=0.33.0"
+tracing-opentelemetry = "=0.34.0"
+
+# Endpoint URLs (ServiceSpec.endpoint) and human-readable duration parsing
+# for configuration files.
+url = "=2.5.8"
+humantime = "=2.4.0"
+
+# TLS: pinned directly so the crypto provider is an explicit frozen decision
+# (ring only; default features off so aws-lc-rs can never enter the graph).
+rustls = { version = "=0.23.45", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+
+[dev-dependencies]
+# Workspace test-support stub: compile-time "does not implement Serialize"
+# probe used by tests/contracts.rs. Never linked into the production binary.
+latchkey-test-support = { path = "crates/test-support" }
 
 # Profile contract (documented in docs/development.md). Tests always run with
 # unwinding: panic = "abort" is set only for release.

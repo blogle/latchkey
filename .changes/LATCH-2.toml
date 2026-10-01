@@ -1,0 +1,4 @@
+# Changelog fragment for LATCH-2 (independent; no shared changelog files).
+category = "Added"
+summary = "Freeze the Latchkey module skeleton, domain types, async ports, error taxonomy, capability stages, and exact dependency pins"
+bump = "patch"
