@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
-"""Pure candidate evidence, cache identity, and child-check validation helpers.
+"""Candidate batch reconstruction and evidence helpers.
 
-The runner consumes explicit ordered heads; it deliberately does not guess
-batch membership/order from Mergify branch names or other undocumented data.
+The workflow invokes this trusted-base module. Queue ordering is supplied by
+Mergify's queue-info metadata (never inferred from a branch name); every PR
+also carries its API-reported base/head so reconstruction is reproducible.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import subprocess
+import argparse
+import sys
+import tempfile
 from typing import Any
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -84,3 +90,100 @@ def manifest(*, heads: list[str], base: str, tree: str, lock: str, toolchain: st
 
 def canonical_json(value: dict[str, Any]) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def git(repo: str, *args: str, input: bytes | None = None) -> bytes:
+    proc = subprocess.run(["git", *args], cwd=repo, input=input, capture_output=True)
+    if proc.returncode:
+        raise ValueError(f"git {args[0]} failed ({proc.returncode})")
+    return proc.stdout
+
+
+def _commit(repo: str, ref: str) -> str:
+    value = git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}").decode().strip()
+    if not SHA.fullmatch(value):
+        raise ValueError(f"invalid or unavailable commit: {ref}")
+    return value
+
+
+def _parents(repo: str, commit: str) -> list[str]:
+    return git(repo, "rev-list", "--parents", "-n", "1", commit).decode().split()[1:]
+
+
+def _fragment_delta(repo: str, parent: str, treeish: str) -> None:
+    statuses = git(repo, "diff", "--name-status", "--no-renames", parent, treeish, "--", ".changes").decode().splitlines()
+    fragments = [line for line in statuses if re.fullmatch(r"[A-Z]\t\.changes/[^/]+\.toml", line)]
+    if len(fragments) != 1 or not fragments[0].startswith("A\t"):
+        raise ValueError("each PR prefix must add exactly one new .changes/*.toml fragment")
+
+
+def reconstruct_prefixes(repo: str, base: str, pull_requests: list[dict[str, Any]],
+                         requested_tree: str | None = None) -> list[dict[str, str]]:
+    """Apply each PR's exact base..head patch in authoritative queue order.
+
+    Each returned SHA is a synthetic one-parent commit over the preceding
+    prefix, suitable for F05 first-parent planning. Worktrees are temporary;
+    tracked source is never modified.
+    """
+    base_commit = _commit(repo, base)
+    if not 1 <= len(pull_requests) <= MAX_BATCH:
+        raise ValueError("batch requires one to three ordered pull requests")
+    prefixes: list[dict[str, str]] = []
+    with tempfile.TemporaryDirectory(prefix="latchkey-candidate-") as tmp:
+        work = os.path.join(tmp, "tree")
+        git(repo, "worktree", "add", "--detach", work, base_commit)
+        try:
+            previous = base_commit
+            for number, pr in enumerate(pull_requests, 1):
+                pr_base = _commit(repo, str(pr.get("base_sha", "")))
+                head = _commit(repo, str(pr.get("head_sha", "")))
+                if len(_parents(repo, head)) > 1:
+                    raise ValueError(f"PR {number} head is a merge commit")
+                # The patch is explicitly bounded by the PR API base/head. A
+                # missing/unknown base cannot be approximated safely.
+                patch = git(repo, "diff", "--binary", "--no-ext-diff", pr_base, head, "--")
+                if not patch:
+                    raise ValueError(f"PR {number} has no reconstructable patch")
+                _fragment_delta(repo, pr_base, head)
+                applied = subprocess.run(["git", "apply", "--index", "--3way", "-"], cwd=work,
+                                         input=patch, capture_output=True)
+                if applied.returncode:
+                    raise ValueError(f"PR {number} patch does not apply cleanly to its ordered prefix")
+                tree = git(work, "write-tree").decode().strip()
+                if not SHA.fullmatch(tree):
+                    raise ValueError("git returned malformed prefix tree")
+                # A PR's own patch is validated against its API base; compare
+                # its fragment delta against the preceding reconstructed tree.
+                _fragment_delta(repo, previous, tree)
+                synthetic = git(repo, "-c", "user.name=Latchkey CI", "-c",
+                                "user.email=ci@users.noreply.github.com", "commit-tree", tree,
+                                "-p", previous, input=f"candidate prefix {number}\n".encode()).decode().strip()
+                prefixes.append({"head_sha": head, "commit": synthetic, "tree": tree})
+                previous = synthetic
+                if number < len(pull_requests):
+                    # Reset the temporary index/worktree to the synthetic tree
+                    # without creating or moving any branch ref.
+                    git(work, "read-tree", "--reset", "-u", tree)
+            if requested_tree is not None and prefixes[-1]["tree"] != requested_tree:
+                raise ValueError("final reconstructed tree differs from requested candidate tree")
+        finally:
+            subprocess.run(["git", "worktree", "remove", "--force", work], cwd=repo,
+                           capture_output=True)
+    return prefixes
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="reconstruct and validate merge-candidate evidence")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    run = subparsers.add_parser("run", help="run the candidate evidence pipeline")
+    run.add_argument("--repository", required=True)
+    run.add_argument("--source", required=True)
+    run.parse_args()
+    print("candidate pipeline unavailable: ordered PR API resolution, per-prefix F05 planning, "
+          "version-injected builds, suite execution, manifest and artifact upload are not implemented",
+          file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

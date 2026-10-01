@@ -37,9 +37,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
+          ref: ${{ github.event.pull_request.base.sha || 'master' }}
           fetch-depth: 0
-      - name: Verify trusted event and exact requested SHA
+      - name: Validate event using trusted base code
         env:
           GITHUB_EVENT_PATH: ${{ github.event_path }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -48,7 +48,22 @@ jobs:
           EVENT_REF: ${{ github.ref }}
           REQUESTED_SHA: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
           TRUSTED_DISPATCH_ACTORS: ${{ vars.LATCHKEY_CI_TRUSTED_DISPATCH_ACTORS }}
-        run: python3 scripts/ci/validate_candidate_event.py
+        run: python3 scripts/ci/validate_candidate_event.py --event-only
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
+          path: candidate
+          fetch-depth: 0
+      - name: Verify exact requested candidate SHA
+        env:
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
+        run: test "$(git -C candidate rev-parse HEAD)" = "$REQUESTED_SHA"
+      - uses: Mergifyio/setup-cli@v2
+        if: ${{ github.event_name == 'pull_request' }}
+      - name: Read ordered Mergify batch metadata
+        id: queue
+        if: ${{ github.event_name == 'pull_request' }}
+        run: mergify ci queue-info
       - uses: DeterminateSystems/nix-installer-action@v23
         with:
           extra_nix_config: |
@@ -56,9 +71,20 @@ jobs:
             trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
       - name: Bootstrap cached toolchain
         run: nix run .#bootstrap
-      - name: Require F05 release plan for requested revision
+      - name: Reconstruct, plan and validate every candidate prefix
         env:
           REQUESTED_SHA: ${{ github.event.pull_request.head.sha || inputs.requested_sha }}
-        run: python3 scripts/release.py plan --commit "$REQUESTED_SHA" --json > candidate-release-plan.json
-      - name: candidate-check
-        run: nix develop -c just candidate-check
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PATH: ${{ github.event_path }}
+          QUEUE_METADATA: ${{ steps.queue.outputs.queue_metadata }}
+          DISPATCH_BASE_SHA: ${{ inputs.base_sha }}
+          DISPATCH_ORDERED_HEADS: ${{ inputs.ordered_heads }}
+        run: python3 scripts/ci/candidate.py run --repository "$GITHUB_WORKSPACE" --source "$GITHUB_WORKSPACE/candidate"
+      - name: Upload candidate evidence and versioned artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latchkey-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate-evidence/
+          if-no-files-found: error
+          retention-days: 90

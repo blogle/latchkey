@@ -21,23 +21,34 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
+      - name: Validate PR provenance from trusted base
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/ci/validate_pr.py --event-only
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          fetch-depth: 0
+      - name: Verify exact candidate revision
+        env:
+          REQUESTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git -C candidate rev-parse HEAD)" = "$REQUESTED_SHA"
       - uses: DeterminateSystems/nix-installer-action@v23
         with:
           extra_nix_config: |
             substituters = https://cache.nixos.org/ https://nix-community.cachix.org
             trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
-      - name: Validate PR provenance and source revision
-        env:
-          GITHUB_EVENT_PATH: ${{ github.event_path }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          REQUESTED_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python3 scripts/ci/validate_pr.py
       - name: Bootstrap cached toolchain
+        working-directory: candidate
         run: nix run .#bootstrap
       - name: Validate merge base and fragment
         shell: bash
+        working-directory: candidate
         run: |
           set -euo pipefail
           git fetch --no-tags origin master
@@ -48,4 +59,5 @@ jobs:
           fi
           python3 scripts/release.py validate-fragment --base "$base"
       - name: pr-check
+        working-directory: candidate
         run: nix develop -c just pr-check

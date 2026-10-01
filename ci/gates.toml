@@ -1,5 +1,5 @@
-# F04 candidate validation policy. Capabilities remain authoritative for the
-# cumulative active suite list; this file adds candidate/prefix invariants.
+# F04 policy contract. Only implemented workflow gates are marked active in
+# docs/ci.md; the artifact/version fields below remain acceptance requirements.
 schema_version = 1
 max_batch_size = 3
 capabilities_file = "ci/capabilities.toml"
@@ -12,7 +12,7 @@ require_all_prefixes = true
 require_final_tree_match = true
 fail_on_missing_batch_metadata = true
 artifact_checksums = "sha256"
-artifact_download = "immutable run-id and artifact-id"
+artifact_download = "not implemented: F07 contract pending"
 provenance_separate_from_content_derivation = true
 
 [[stages]]

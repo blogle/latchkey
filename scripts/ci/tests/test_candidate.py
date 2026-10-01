@@ -1,4 +1,7 @@
 import sys
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,6 +18,31 @@ TREE = "d" * 40
 
 
 class CandidateTests(unittest.TestCase):
+    def _repo(self):
+        directory = tempfile.TemporaryDirectory(prefix="candidate-fixture-")
+        repo = directory.name
+        def run(*args):
+            return subprocess.run(["git", *args], cwd=repo, check=True, text=True,
+                                  capture_output=True).stdout.strip()
+        run("init", "-q")
+        run("config", "user.name", "Candidate fixture")
+        run("config", "user.email", "candidate@example.invalid")
+        (Path(repo) / "base.txt").write_text("base\n")
+        run("add", ".")
+        run("commit", "-qm", "base")
+        base = run("rev-parse", "HEAD")
+        (Path(repo) / ".changes" ).mkdir()
+        (Path(repo) / ".changes" / "A-1.toml").write_text('category = "Added"\nsummary = "A"\n')
+        run("add", ".")
+        run("commit", "-qm", "PR A")
+        head_a = run("rev-parse", "HEAD")
+        (Path(repo) / ".changes" / "B-2.toml").write_text('category = "Fixed"\nsummary = "B"\n')
+        run("add", ".")
+        run("commit", "-qm", "PR B")
+        head_b = run("rev-parse", "HEAD")
+        tree_b = run("rev-parse", "HEAD^{tree}")
+        return directory, repo, base, head_a, head_b, tree_b
+
     def test_ordinary_same_repo_pr_exact_sha(self):
         event = {"action": "synchronize", "repository": {"full_name": "blogle/latchkey"},
                  "pull_request": {"head": {"sha": SHA_A, "repo": {"full_name": "blogle/latchkey"}},
@@ -23,7 +51,9 @@ class CandidateTests(unittest.TestCase):
 
     def test_legitimate_queue_pr(self):
         event = {"repository": {"full_name": "blogle/latchkey"}, "pull_request": {
-            "head": {"ref": "mergify/merge-queue/main/pr-1", "sha": SHA_A},
+            "head": {"ref": "mergify/merge-queue/main/pr-1", "sha": SHA_A,
+                     "repo": {"full_name": "blogle/latchkey"}},
+            "base": {"ref": "master"},
             "user": {"login": "mergify[bot]"}}}
         env = {"GITHUB_REPOSITORY": "blogle/latchkey", "REQUESTED_SHA": SHA_A,
                "EVENT_NAME": "pull_request"}
@@ -31,7 +61,8 @@ class CandidateTests(unittest.TestCase):
 
     def test_spoofed_branch_prefix_rejected(self):
         event = {"repository": {"full_name": "blogle/latchkey"}, "pull_request": {
-            "head": {"ref": "mergify/merge-queue/fake", "sha": SHA_A}, "user": {"login": "attacker"}}}
+            "head": {"ref": "mergify/merge-queue/fake", "sha": SHA_A,
+                     "repo": {"full_name": "blogle/latchkey"}}, "user": {"login": "attacker"}}}
         with self.assertRaisesRegex(ValueError, "Mergify GitHub App"):
             validate_event(event, {"GITHUB_REPOSITORY": "blogle/latchkey", "REQUESTED_SHA": SHA_A,
                                    "EVENT_NAME": "pull_request"}, SHA_A)
@@ -74,9 +105,35 @@ class CandidateTests(unittest.TestCase):
         key = candidate.cache_key(TREE, "lock-1", "rust-1.96", "default", "ci", "0.0.1")
         self.assertEqual(key, candidate.cache_key(TREE, "lock-1", "rust-1.96", "default", "ci", "0.0.1"))
         self.assertNotEqual(key, candidate.cache_key(TREE, "lock-2", "rust-1.96", "default", "ci", "0.0.1"))
+        self.assertNotEqual(key, candidate.cache_key(TREE, "lock-1", "rust-1.96", "default", "ci", "0.0.2"))
+
+    def test_real_git_batch_reconstructs_two_ordered_prefixes(self):
+        temp, repo, base, a, b, tree = self._repo()
+        self.addCleanup(temp.cleanup)
+        prefixes = candidate.reconstruct_prefixes(repo, base, [
+            {"head_sha": a, "base_sha": base}, {"head_sha": b, "base_sha": a}], tree)
+        self.assertEqual([item["head_sha"] for item in prefixes], [a, b])
+        self.assertEqual(prefixes[-1]["tree"], tree)
+        self.assertEqual(len(subprocess.run(["git", "rev-list", "--parents", "-n", "1", prefixes[1]["commit"]],
+                                            cwd=repo, check=True, text=True, capture_output=True).stdout.split()), 2)
+
+    def test_real_git_final_tree_mismatch_and_bad_prefix_reject(self):
+        temp, repo, base, a, b, tree = self._repo()
+        self.addCleanup(temp.cleanup)
+        batch = [{"head_sha": a, "base_sha": base}, {"head_sha": b, "base_sha": a}]
+        with self.assertRaisesRegex(ValueError, "final reconstructed tree"):
+            candidate.reconstruct_prefixes(repo, base, batch, "f" * 40)
+        prefixes = candidate.reconstruct_prefixes(repo, base, batch, tree)
+        evidence = [{"head_sha": prefix["head_sha"], "tree": prefix["tree"],
+                     "version": f"0.0.{index}", "suites": ["foundation"],
+                     "result": "failed" if index == 1 else "passed"}
+                    for index, prefix in enumerate(prefixes, 1)]
+        with self.assertRaisesRegex(ValueError, "every prefix must pass"):
+            candidate.validate_batch(base, tree, [a, b], evidence)
 
     def test_manual_dispatch_is_allowlisted_and_exact(self):
-        event = {"repository": {"full_name": "blogle/latchkey"}, "inputs": {"requested_sha": SHA_A}}
+        event = {"repository": {"full_name": "blogle/latchkey"}, "inputs": {
+            "requested_sha": SHA_A, "ordered_heads": f'["{SHA_A}"]', "base_sha": SHA_B}}
         env = {"GITHUB_REPOSITORY": "blogle/latchkey", "REQUESTED_SHA": SHA_A,
                "EVENT_NAME": "workflow_dispatch", "EVENT_REF": "refs/heads/master",
                "GITHUB_ACTOR": "trusted", "TRUSTED_DISPATCH_ACTORS": "trusted"}
