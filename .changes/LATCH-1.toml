@@ -1,0 +1,4 @@
+# Changelog fragment for LATCH-1 (independent; no shared changelog files).
+category = "Added"
+summary = "Add pinned Nix/Crane Rust 1.96.0 bootstrap package with just workflow, OCI image, and CI gates"
+bump = "patch"

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Latchkey bootstrap logic (the bootstrap entry in flake.nix embeds this
+# file and prepends a locked `just` plus coreutils to PATH, so nothing here
+# depends on `just` from the system PATH).
+#
+# Usage (from the repository root):
+#   nix run .#bootstrap              # runs `just setup`
+#   nix run .#bootstrap -- <recipe>  # runs `just <recipe>`, e.g. doctor
+
+set -euo pipefail
+
+if [[ ! -f justfile && ! -f Justfile ]]; then
+  echo "error: no justfile found in ${PWD}" >&2
+  echo "hint: run 'nix run .#bootstrap' from the repository root" >&2
+  exit 1
+fi
+
+if [[ "$#" -eq 0 ]]; then
+  exec just setup
+fi
+
+exec just "$@"
