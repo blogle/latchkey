@@ -110,12 +110,14 @@ candidate-check: fmt-check lint test-unit
     nix flake check
 
     echo "==> nix build .#package .#oci"
+    # nix names multi-installable out-links: result (first) and result-1
+    # (second), in argument order.
     nix build .#package .#oci
-    if [[ ! -e result || ! -e result-2 ]]; then
-      fail "expected nix to produce result (package) and result-oci (image) out-links"
+    if [[ ! -e result || ! -e result-1 ]]; then
+      fail "expected nix to produce result (package) and result-1 (image) out-links"
     fi
     native_bin="result/bin/latchkey"
-    image_tar="result-2"
+    image_tar="result-1"
 
     echo "==> native smoke: --help / --version / serve must fail"
     [[ -x "$native_bin" ]] || fail "$native_bin missing or not executable"
@@ -138,7 +140,9 @@ candidate-check: fmt-check lint test-unit
 
     echo "==> OCI smoke: extract image layers, run the static binary directly"
     smoke_dir="$(mktemp -d)"
-    trap 'rm -rf "$smoke_dir"' EXIT
+    # Extracted store paths are read-only (as in the nix store); make them
+    # writable again so cleanup succeeds.
+    trap 'chmod -R u+w "$smoke_dir" 2>/dev/null || true; rm -rf "$smoke_dir"' EXIT
     mkdir -p "$smoke_dir/layers" "$smoke_dir/rootfs"
 
     if tar -tzf "$image_tar" >/dev/null 2>&1; then
@@ -149,7 +153,9 @@ candidate-check: fmt-check lint test-unit
 
     manifest="$smoke_dir/layers/manifest.json"
     [[ -f "$manifest" ]] || fail "image archive has no manifest.json"
-    layers="$(sed -n 's/.*"Layers":\[\(.*\)\].*/\1/p' "$manifest" | tr ',' '\n' | tr -d '"')"
+    # Manifests are pretty-printed; each layer reference sits on its own
+    # line and always ends in layer.tar.
+    layers="$(grep -oE '"[^"]+layer\.tar"' "$manifest" | tr -d '"' || true)"
     [[ -n "$layers" ]] || fail "could not parse layer list from manifest.json"
     while IFS= read -r layer; do
       [[ -f "$smoke_dir/layers/$layer" ]] || fail "missing layer $layer"
