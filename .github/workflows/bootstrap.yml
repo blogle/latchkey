@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v23
         with:
           extra_nix_config: |
@@ -24,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v23
         with:
           extra_nix_config: |
