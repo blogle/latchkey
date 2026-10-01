@@ -1,0 +1,4 @@
+# Changelog fragment for LATCH-4 (independent; no shared changelog files).
+category = "Added"
+summary = "Add deterministic Dojo-style changelog and patch-release planning with changelog-fragment validation"
+bump = "patch"

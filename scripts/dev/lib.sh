@@ -234,11 +234,35 @@ lk_suite_owner() {
   esac
 }
 
-# List script-test suites (file names under scripts/dev/tests/test_*.py).
+# List script-test suites (LATCH-4: generic multi-root discovery).
+#
+# One rule, three roots, first match wins when a suite name exists in more
+# than one root; the listing below is the deduplicated union (sorted):
+#   1. scripts/dev/tests/test_<suite>.py  — single-file dispatcher suite
+#   2. tests/<suite>/                     — directory suite: unittest
+#                                           discovers test_*.py inside it
+#   3. scripts/ci/tests/test_<suite>.py   — single-file CI suite
+# script-test.sh resolves a requested suite with the same rule; keep the two
+# in sync (the release_policy suite exercises root 2 end to end).
 lk_script_suites() {
-  local f
-  for f in "$LK_ROOT"/scripts/dev/tests/test_*.py; do
-    [[ -e "$f" ]] || continue
-    basename "$f" .py | sed 's/^test_//'
-  done
+  local f d found
+  {
+    for f in "$LK_ROOT"/scripts/dev/tests/test_*.py; do
+      [[ -e "$f" ]] || continue
+      basename "$f" .py | sed 's/^test_//'
+    done
+    for d in "$LK_ROOT"/tests/*/; do
+      [[ -d "$d" ]] || continue
+      found=0
+      for f in "$d"test_*.py; do
+        [[ -e "$f" ]] && found=1
+      done
+      [[ "$found" -eq 1 ]] || continue
+      basename "$d"
+    done
+    for f in "$LK_ROOT"/scripts/ci/tests/test_*.py; do
+      [[ -e "$f" ]] || continue
+      basename "$f" .py | sed 's/^test_//'
+    done
+  } | LC_ALL=C sort -u
 }

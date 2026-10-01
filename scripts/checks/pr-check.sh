@@ -19,13 +19,17 @@ echo "==> lint (clippy, all targets, -D warnings)"
 "$HERE/../dev/cargo.sh" lint
 
 echo "==> script-test (python dispatcher suites)"
+# Generic multi-root suite discovery (LATCH-4 glue): reuse the exact rule
+# script-test.sh applies per suite, so pr-check always runs precisely the
+# suites `just script-test <name>` can resolve (dev tests, tests/<name>/ dirs,
+# ci tests — see lk_script_suites in scripts/dev/lib.sh).
 suites=()
-for f in "$LK_ROOT"/scripts/dev/tests/test_*.py; do
-  [[ -e "$f" ]] || continue
-  suites+=("$(basename "$f" .py | sed 's/^test_//')")
-done
+while IFS= read -r suite; do
+  [[ -n "$suite" ]] || continue
+  suites+=("$suite")
+done < <(lk_script_suites)
 if [[ "${#suites[@]}" -eq 0 ]]; then
-  lk_fail "pr-check: no script-test suites found under scripts/dev/tests/ (the dispatcher test suite is part of the gate)"
+  lk_fail "pr-check: no script-test suites discovered by lk_script_suites (see scripts/dev/lib.sh)"
 fi
 for suite in "${suites[@]}"; do
   echo "==> script-test $suite"
