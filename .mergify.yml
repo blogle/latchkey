@@ -6,7 +6,7 @@ queue_rules:
       - head-repo-full-name=blogle/latchkey
       - -draft
       - linear-history
-      - conflict = false
+      - -conflict
       - label != blocked
       - label != blocker
       - label != hold
