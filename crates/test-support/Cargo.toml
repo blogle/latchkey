@@ -1,0 +1,16 @@
+[package]
+name = "latchkey-test-support"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+publish = false
+description = "Workspace test-support stub: compile-time contract assertions shared by Latchkey test suites (never published, never linked into the binary)"
+
+# The production package depends on this crate only as a dev-dependency, so
+# no gate that builds the release binary or the OCI image ever compiles it.
+# Deliberately minimal: exactly one direct dependency (serde), used by the
+# `assert_not_serialize!` probe.
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }

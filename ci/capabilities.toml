@@ -1,0 +1,68 @@
+# Capability stages for Latchkey CI (LATCH-2 / F02).
+#
+# This file is DATA ONLY: later CI tickets read it to decide which gates are
+# mandatory for a given capability stage. Nothing here executes anything,
+# and no script may weaken a gate that a stage already lists.
+#
+# Self-description:
+#   * `gates_are_cumulative` is the core invariant: each stage's `gates`
+#     list is the FULL set of mandatory gates for that stage, so a
+#     transition to a later stage may only ADD gates. A stage never lists a
+#     subset of an earlier stage's gates.
+#   * Every gate carries the exact `just` invocation to run and the ticket
+#     that owns the command surface (for gates that still fail closed until
+#     their owning ticket lands, the command name is already reserved on
+#     the frozen just surface).
+#   * Stage ordering is given by `extends`: standalone extends foundation,
+#     kubernetes extends standalone.
+
+schema_version = 1
+gates_are_cumulative = true
+transition_policy = "A transition may only ADD mandatory gates; it may never remove, weaken, or replace a gate already required by an earlier stage."
+
+[[stages]]
+id = "foundation"
+description = "Shared contracts, module skeleton, and fast correctness gates. No runtime behaviour beyond the LATCH-1 CLI is required."
+gates = [
+  { id = "fmt-check", command = "just fmt-check", owner = "LATCH-3" },
+  { id = "lint", command = "just lint", owner = "LATCH-3" },
+  { id = "script-test-dispatch", command = "just script-test dispatch", owner = "LATCH-3" },
+  { id = "test-unit", command = "just test-unit", owner = "LATCH-3" },
+  { id = "test-integration-contracts", command = "just test-integration contracts", owner = "LATCH-2" },
+  { id = "build", command = "just build", owner = "LATCH-3" },
+  { id = "pr-check", command = "just pr-check", owner = "LATCH-3" },
+]
+
+[[stages]]
+id = "standalone"
+description = "One binary serves search/exec end to end against real Streamable HTTP downstream fixtures, without Kubernetes or Kubernetes mocks."
+extends = "foundation"
+gates = [
+  { id = "fmt-check", command = "just fmt-check", owner = "LATCH-3" },
+  { id = "lint", command = "just lint", owner = "LATCH-3" },
+  { id = "script-test-dispatch", command = "just script-test dispatch", owner = "LATCH-3" },
+  { id = "test-unit", command = "just test-unit", owner = "LATCH-3" },
+  { id = "test-integration-contracts", command = "just test-integration contracts", owner = "LATCH-2" },
+  { id = "build", command = "just build", owner = "LATCH-3" },
+  { id = "pr-check", command = "just pr-check", owner = "LATCH-3" },
+  { id = "e2e-standalone", command = "just e2e-standalone", owner = "LATCH-21" },
+  { id = "candidate-check", command = "just candidate-check", owner = "LATCH-3" },
+]
+
+[[stages]]
+id = "kubernetes"
+description = "Same binary configured through the MCPService CRD, with status publication, Secret-sourced headers, and real-cluster verification on top of the standalone gates."
+extends = "standalone"
+gates = [
+  { id = "fmt-check", command = "just fmt-check", owner = "LATCH-3" },
+  { id = "lint", command = "just lint", owner = "LATCH-3" },
+  { id = "script-test-dispatch", command = "just script-test dispatch", owner = "LATCH-3" },
+  { id = "test-unit", command = "just test-unit", owner = "LATCH-3" },
+  { id = "test-integration-contracts", command = "just test-integration contracts", owner = "LATCH-2" },
+  { id = "build", command = "just build", owner = "LATCH-3" },
+  { id = "pr-check", command = "just pr-check", owner = "LATCH-3" },
+  { id = "e2e-standalone", command = "just e2e-standalone", owner = "LATCH-21" },
+  { id = "candidate-check", command = "just candidate-check", owner = "LATCH-3" },
+  { id = "crd-generate-check", command = "just generate-crd", owner = "LATCH-16" },
+  { id = "k8s-test-run", command = "just k8s-test-run", owner = "LATCH-24" },
+]

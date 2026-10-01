@@ -1,9 +1,31 @@
-//! Argument handling for the Latchkey bootstrap binary.
+//! Latchkey gateway library.
 //!
-//! The MCP gateway is deliberately *not* implemented yet. This library only
-//! provides honest behavior for the placeholder binary: `--help` and
-//! `--version` work, and every other invocation (including any attempt to
-//! serve) fails closed with an explicit non-zero exit code.
+//! Two responsibilities live in this crate root:
+//!
+//! 1. The **module skeleton** (LATCH-2 / F02): every lane module is declared
+//!    exactly once, here, so parallel tickets never have to edit the root.
+//!    The domain types, async ports, and error taxonomy that those lanes
+//!    implement are frozen in [`contracts`].
+//! 2. The **LATCH-1 CLI surface**: honest behavior for the placeholder
+//!    binary — `--help` and `--version` work, and every other invocation
+//!    (in particular any attempt to serve) fails closed with a non-zero exit
+//!    code.
+
+// Root module declarations — frozen list, declared once (LATCH-2). All lane
+// modules except `contracts` are empty files today; later tickets fill them
+// in without touching this file.
+pub mod catalog;
+pub mod contracts;
+pub mod downstream;
+pub mod health;
+pub mod kubernetes;
+pub mod local_config;
+pub mod reconcile;
+pub mod router;
+pub mod runtime;
+pub mod search;
+pub mod server;
+pub mod telemetry;
 
 use std::io::Write;
 
