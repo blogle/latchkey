@@ -75,3 +75,10 @@ jobs:
           set -euo pipefail
           source candidate/.dev/env
           "$LATCHKEY_JUST" --justfile "$GITHUB_WORKSPACE/justfile" --working-directory "$GITHUB_WORKSPACE/candidate" pr-check
+      - name: contracts
+        env:
+          LK_ROOT: ${{ github.workspace }}/candidate
+        run: |
+          set -euo pipefail
+          source candidate/.dev/env
+          "$LATCHKEY_JUST" --justfile "$GITHUB_WORKSPACE/justfile" --working-directory "$GITHUB_WORKSPACE/candidate" test-integration contracts

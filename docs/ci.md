@@ -8,9 +8,11 @@ from that trusted revision before checking out the requested head into a
 separate directory (with persisted checkout credentials disabled). It
 validates exact same-repository head SHA, rejects merge commits since merge
 base, and runs the trusted F05 fragment validator with `--root` pointing at the
-candidate checkout. The trusted justfile and dispatcher run `pr-check` against
-the candidate checkout via `--working-directory` and `LK_ROOT`. `pr-fast` is
-the stable queue-admission check; queue PRs do not run this workflow.
+candidate checkout. After setting up the candidate's cached environment, the
+trusted justfile and cached just tool run `pr-check` and the integration
+`contracts` suite against the candidate checkout via `--working-directory` and
+`LK_ROOT`. `pr-fast` is the stable queue-admission check; queue PRs do not run
+this workflow.
 
 ## Candidate metadata and trust boundary
 
