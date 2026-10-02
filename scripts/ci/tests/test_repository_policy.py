@@ -89,13 +89,15 @@ class RepositoryPolicyTests(unittest.TestCase):
             policy.apply_policy(api, "blogle/latchkey", baseline)
         self.assertEqual(api.writes, [])
 
-    def test_apply_posts_squash_rules_without_bypass_and_is_repeatable(self):
+    def test_apply_posts_squash_rules_with_only_mergify_bypass_and_is_repeatable(self):
         api = FakeGh()
         policy.apply_policy(api, "blogle/latchkey", initial_snapshot())
         method, endpoint, body = api.writes[-1]
         self.assertEqual(method, "POST")
         self.assertEqual(endpoint, "repos/blogle/latchkey/rulesets")
-        self.assertEqual(body["bypass_actors"], [])
+        self.assertEqual(body["bypass_actors"], [{
+            "actor_id": 10562, "actor_type": "Integration", "bypass_mode": "pull_request",
+        }])
         checks = next(r for r in body["rules"] if r["type"] == "required_status_checks")
         self.assertEqual(checks["parameters"]["required_status_checks"],
                          [{"context": "Mergify Merge Queue", "integration_id": 10562}])
@@ -122,6 +124,24 @@ class RepositoryPolicyTests(unittest.TestCase):
             *policy.DESIRED_RULESET["rules"][1:],
         ]
         self.assertEqual(policy.normalized_ruleset(current), policy.DESIRED_RULESET)
+
+    def test_ruleset_normalization_accepts_only_the_exact_mergify_bypass_actor(self):
+        current = dict(policy.DESIRED_RULESET, id=18, current_user_can_bypass="never")
+        current["bypass_actors"] = [{
+            **policy.DESIRED_RULESET["bypass_actors"][0], "actor_name": "Mergify",
+        }]
+        self.assertEqual(policy.normalized_ruleset(current), policy.DESIRED_RULESET)
+
+        invalid_actor_lists = (
+            [{"actor_id": 10562, "actor_type": "User", "bypass_mode": "pull_request"}],
+            [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}],
+            [policy.DESIRED_RULESET["bypass_actors"][0],
+             {"actor_id": 1, "actor_type": "User", "bypass_mode": "always"}],
+        )
+        for actors in invalid_actor_lists:
+            with self.subTest(actors=actors):
+                current["bypass_actors"] = actors
+                self.assertNotEqual(policy.normalized_ruleset(current), policy.DESIRED_RULESET)
 
     def test_apply_requires_admin(self):
         with self.assertRaisesRegex(ValueError, "admin permission"):

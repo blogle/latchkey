@@ -25,7 +25,11 @@ DESIRED_RULESET = {
     "name": RULESET_NAME,
     "target": "branch",
     "enforcement": "active",
-    "bypass_actors": [],
+    "bypass_actors": [{
+        "actor_id": MERGIFY_APP_ID,
+        "actor_type": "Integration",
+        "bypass_mode": "pull_request",
+    }],
     "conditions": {"ref_name": {"include": ["refs/heads/master"], "exclude": []}},
     "rules": [
         {"type": "pull_request", "parameters": {
@@ -120,6 +124,10 @@ def read_snapshot(path: str) -> dict:
 
 def normalized_ruleset(row: dict) -> dict:
     normalized = {key: row.get(key) for key in DESIRED_RULESET if key != "rules"}
+    normalized["bypass_actors"] = [
+        {key: actor.get(key) for key in ("actor_id", "actor_type", "bypass_mode")}
+        for actor in row.get("bypass_actors", [])
+    ]
     expected_rules = {rule["type"]: rule for rule in DESIRED_RULESET["rules"]}
     observed_rules = {rule["type"]: rule for rule in row.get("rules", [])}
     normalized["rules"] = []
