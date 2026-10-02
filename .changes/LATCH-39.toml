@@ -1,0 +1,2 @@
+category = "Fixed"
+summary = "Reconstruct verified Mergify queue stacks as linear candidate prefixes and activate the Nix community cache"

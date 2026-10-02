@@ -23,6 +23,7 @@ from typing import Any
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 MAX_BATCH = 3
+MAX_NORMALIZED_QUEUE = 100
 
 
 def digest(value: bytes) -> str:
@@ -215,9 +216,12 @@ def execute(args: argparse.Namespace) -> None:
     repository = os.path.realpath(args.repository)
     trusted = os.path.realpath(args.trusted)
     batch = json.loads(open(args.batch, encoding="utf-8").read())
-    if set(batch) != {"schema", "base_sha", "requested_tree", "pull_requests"} or batch["schema"] != "latchkey-candidate-batch/v1":
+    if set(batch) not in ({"schema", "base_sha", "requested_tree", "pull_requests"},
+                          {"schema", "base_sha", "base_stack", "requested_tree", "pull_requests"},
+                          {"schema", "base_sha", "base_stack", "base_tree", "requested_tree", "pull_requests"}) or batch["schema"] != "latchkey-candidate-batch/v1":
         raise ValueError("batch must be canonical latchkey-candidate-batch/v1")
     prs = batch["pull_requests"]
+    base_stack = batch.get("base_stack", [])
     if not isinstance(prs, list) or not 1 <= len(prs) <= MAX_BATCH:
         raise ValueError("batch requires one to three ordered PR records")
     for pr in prs:
@@ -236,7 +240,9 @@ def execute(args: argparse.Namespace) -> None:
         raise ValueError("requested Mergify candidate tree differs from batch tree")
     # Reconstruct using the candidate repository object database. The workflow
     # fetches exact PR heads into this checkout after trusted metadata resolution.
-    prefixes = reconstruct_prefixes(repository, base, prs, requested_tree)
+    normalized_prs = normalize_pr_sequence(base_stack, prs)
+    prefixes = reconstruct_prefixes(repository, base, normalized_prs, requested_tree,
+                                    batch.get("base_tree"), len(base_stack))
     lock_fingerprint = digest((__import__("pathlib").Path(source) / "Cargo.lock").read_bytes())
     toolchain_file = (__import__("pathlib").Path(source) / "rust-toolchain.toml").read_bytes()
     toolchain = digest(toolchain_file)
@@ -305,7 +311,7 @@ def execute(args: argparse.Namespace) -> None:
             artifact_path = artifacts_dir / name
             shutil.copy2(binary, artifact_path)
             artifact_hash = digest(artifact_path.read_bytes())
-            all_prefixes.append({"number": prs[index - 1]["number"], "head_sha": prefix["head_sha"],
+            all_prefixes.append({"number": normalized_prs[index - 1]["number"], "head_sha": prefix["head_sha"],
                                  "synthetic_sha": prefix["commit"], "tree": prefix["tree"],
                                   "release_version": version,
                                   "suite_results": [{"command": row["command"], "result": row["result"]}
@@ -337,10 +343,10 @@ def execute(args: argparse.Namespace) -> None:
                 "provenance": {"workflow_run_id": os.environ.get("GITHUB_RUN_ID", "local"),
                                "git_commit_metadata_in_content_derivation": False}}
     if result == "passed":
-        if len(all_prefixes) != len(prs) or any(p["result"] != "passed" for p in all_prefixes):
+        if len(all_prefixes) != len(normalized_prs) or any(p["result"] != "passed" for p in all_prefixes):
             raise ValueError("manifest prefix validation failed")
         manifest_path = evidence_dir / "manifest.json"
-        validate_evidence(document, evidence_dir, prs, suites)
+        validate_evidence(document, evidence_dir, normalized_prs, suites)
         if all_prefixes[-1]["tree"] != requested_tree:
             raise ValueError("manifest final prefix tree differs from requested candidate tree")
         manifest_path.write_bytes(canonical_json(document))
@@ -357,9 +363,14 @@ def print_cache_key(args: argparse.Namespace) -> None:
     source = os.path.realpath(args.source)
     trusted = os.path.realpath(args.trusted)
     batch = json.loads(open(args.batch, encoding="utf-8").read())
-    if set(batch) != {"schema", "base_sha", "requested_tree", "pull_requests"} or batch["schema"] != "latchkey-candidate-batch/v1":
+    if set(batch) not in ({"schema", "base_sha", "requested_tree", "pull_requests"},
+                          {"schema", "base_sha", "base_stack", "requested_tree", "pull_requests"},
+                          {"schema", "base_sha", "base_stack", "base_tree", "requested_tree", "pull_requests"}) or batch["schema"] != "latchkey-candidate-batch/v1":
         raise ValueError("batch must be canonical latchkey-candidate-batch/v1")
-    prefixes = reconstruct_prefixes(args.repository, batch["base_sha"], batch["pull_requests"], batch["requested_tree"])
+    normalized_prs = normalize_pr_sequence(batch.get("base_stack", []), batch["pull_requests"])
+    prefixes = reconstruct_prefixes(args.repository, batch["base_sha"], normalized_prs,
+                                    batch["requested_tree"], batch.get("base_tree"),
+                                    len(batch.get("base_stack", [])))
     versions = []
     for prefix in prefixes:
         plan = json.loads(_run([sys.executable, os.path.join(trusted, "scripts/release.py"), "--root", source,
@@ -436,7 +447,8 @@ def _fragment_delta(repo: str, parent: str, treeish: str) -> None:
 
 
 def reconstruct_prefixes(repo: str, base: str, pull_requests: list[dict[str, Any]],
-                         requested_tree: str | None = None) -> list[dict[str, str]]:
+                         requested_tree: str | None = None, expected_base_tree: str | None = None,
+                         base_stack_length: int = 0) -> list[dict[str, str]]:
     """Apply each PR's exact base..head patch in authoritative queue order.
 
     Each returned SHA is a synthetic one-parent commit over the preceding
@@ -444,8 +456,15 @@ def reconstruct_prefixes(repo: str, base: str, pull_requests: list[dict[str, Any
     tracked source is never modified.
     """
     base_commit = _commit(repo, base)
-    if not 1 <= len(pull_requests) <= MAX_BATCH:
-        raise ValueError("batch requires one to three ordered pull requests")
+    if len(_parents(repo, base_commit)) > 1:
+        raise ValueError("normalized queue root must not be a merge commit")
+    if expected_base_tree is not None and base_stack_length == 0:
+        if git(repo, "rev-parse", f"{base_commit}^{{tree}}").decode().strip() != expected_base_tree:
+            raise ValueError("normalized queue root tree differs from Mergify checking-base tree")
+    if base_stack_length and expected_base_tree is None:
+        raise ValueError("preceding queue stack requires an authoritative checking-base tree")
+    if not 1 <= len(pull_requests) <= MAX_NORMALIZED_QUEUE:
+        raise ValueError("normalized queue requires one to one hundred ordered pull requests")
     prefixes: list[dict[str, str]] = []
     with tempfile.TemporaryDirectory(prefix="latchkey-candidate-") as tmp:
         work = os.path.join(tmp, "tree")
@@ -478,6 +497,8 @@ def reconstruct_prefixes(repo: str, base: str, pull_requests: list[dict[str, Any
                                 "-p", previous, input=f"candidate prefix {number}\n".encode()).decode().strip()
                 prefixes.append({"head_sha": head, "commit": synthetic, "tree": tree})
                 previous = synthetic
+                if number == base_stack_length and expected_base_tree is not None and tree != expected_base_tree:
+                    raise ValueError("verified preceding queue prefixes do not reproduce Mergify checking-base tree")
                 if number < len(pull_requests):
                     # Reset the temporary index/worktree to the synthetic tree
                     # without creating or moving any branch ref.
@@ -488,6 +509,29 @@ def reconstruct_prefixes(repo: str, base: str, pull_requests: list[dict[str, Any
             subprocess.run(["git", "worktree", "remove", "--force", work], cwd=repo,
                            capture_output=True)
     return prefixes
+
+
+def normalize_pr_sequence(base_stack: list[dict[str, Any]],
+                          pull_requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Combine API-verified preceding queue entries and the current ordered batch."""
+    if not isinstance(base_stack, list) or len(base_stack) > MAX_NORMALIZED_QUEUE:
+        raise ValueError("preceding queue stack exceeds the 100-PR safety limit")
+    combined = base_stack + pull_requests
+    if len(combined) > MAX_NORMALIZED_QUEUE:
+        raise ValueError("normalized queue sequence exceeds the 100-PR safety limit")
+    seen_numbers: set[int] = set()
+    seen_heads: set[str] = set()
+    for row in combined:
+        if (not isinstance(row, dict) or set(row) != {"number", "head_sha", "base_sha"}
+                or not isinstance(row["number"], int) or row["number"] <= 0
+                or any(not isinstance(row.get(key), str) or not SHA.fullmatch(row[key])
+                       for key in ("head_sha", "base_sha"))):
+            raise ValueError("normalized queue sequence contains invalid authoritative PR metadata")
+        if row["number"] in seen_numbers or row["head_sha"] in seen_heads:
+            raise ValueError("normalized queue sequence contains duplicate PRs")
+        seen_numbers.add(row["number"])
+        seen_heads.add(row["head_sha"])
+    return combined
 
 
 def main() -> int:
