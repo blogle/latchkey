@@ -109,8 +109,12 @@ class RepositoryPolicyTests(unittest.TestCase):
         baseline = initial_snapshot()
         state = dict(baseline)
         state["settings"] = dict(policy.DESIRED_REPO)
-        state["rulesets"] = [dict(policy.DESIRED_RULESET, id=18)]
+        state["rulesets"] = [dict(policy.DESIRED_RULESET, id=18, current_user_can_bypass="never")]
+        state["rulesets"][0]["bypass_actors"] = [{
+            **policy.DESIRED_RULESET["bypass_actors"][0], "actor_name": "Mergify",
+        }]
         api = FakeGh(state)
+        self.assertEqual(policy.diff(baseline, state)["ruleset"]["operation"], "unchanged")
         policy.apply_policy(api, "blogle/latchkey", baseline)
         self.assertEqual(api.writes, [])
 

@@ -107,7 +107,7 @@ def diff(snapshot: dict, current: dict) -> dict:
         "ruleset": {
             "name": RULESET_NAME,
             "operation": "unchanged" if any(r.get("name") == RULESET_NAME and
-                canonical({k: r.get(k) for k in DESIRED_RULESET}) == canonical(DESIRED_RULESET)
+                canonical(normalized_ruleset(r)) == canonical(DESIRED_RULESET)
                 for r in current["rulesets"]) else "create-or-update",
             "desired": DESIRED_RULESET,
         },
