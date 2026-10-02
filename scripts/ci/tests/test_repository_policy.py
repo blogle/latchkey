@@ -38,6 +38,9 @@ class FakeGh:
             return self.snapshot["branch_protection"]
         if method == "GET" and endpoint.endswith("/rulesets?includes_parents=false&per_page=100"):
             return self.snapshot["rulesets"]
+        if method == "GET" and "/rulesets/" in endpoint:
+            ruleset_id = int(endpoint.rsplit("/", 1)[1])
+            return next(row for row in self.snapshot["rulesets"] if row.get("id") == ruleset_id)
         if method == "GET" and endpoint == "repos/blogle/latchkey":
             return {"default_branch": self.snapshot["default_branch"],
                     **self.snapshot["settings"], "permissions": {"admin": self.admin}}
@@ -108,6 +111,17 @@ class RepositoryPolicyTests(unittest.TestCase):
         api = FakeGh(state)
         policy.apply_policy(api, "blogle/latchkey", baseline)
         self.assertEqual(api.writes, [])
+
+    def test_ruleset_normalization_ignores_github_added_defaults(self):
+        current = dict(policy.DESIRED_RULESET, id=18, current_user_can_bypass="never")
+        current["rules"] = [
+            {"type": "pull_request", "parameters": {
+                **policy.DESIRED_RULESET["rules"][0]["parameters"],
+                "required_reviewers": [], "require_extra_approval_for_unattributed_changes": True,
+            }},
+            *policy.DESIRED_RULESET["rules"][1:],
+        ]
+        self.assertEqual(policy.normalized_ruleset(current), policy.DESIRED_RULESET)
 
     def test_apply_requires_admin(self):
         with self.assertRaisesRegex(ValueError, "admin permission"):

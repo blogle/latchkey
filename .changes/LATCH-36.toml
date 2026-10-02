@@ -1,0 +1,3 @@
+category = "Fixed"
+summary = "Verify repository policy against complete GitHub ruleset details"
+bump = "patch"
