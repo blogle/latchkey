@@ -16,7 +16,6 @@ queue_rules:
     batch_size: 1
     merge_method: squash
     update_method: rebase
-    branch_protection_injection_mode: merge
 
   - name: default
     queue_conditions: *queue_conditions
@@ -24,7 +23,6 @@ queue_rules:
     batch_size: 3
     merge_method: squash
     update_method: rebase
-    branch_protection_injection_mode: merge
 
 merge_queue:
   reset_on_external_merge: always

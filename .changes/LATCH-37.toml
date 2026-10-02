@@ -1,0 +1,2 @@
+category = "Fixed"
+summary = "Remove incompatible Mergify branch-protection injection mode while retaining F06 queue gates"
