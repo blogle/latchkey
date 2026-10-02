@@ -75,6 +75,11 @@ def take_snapshot(api: Gh, repo: str) -> dict:
     info = api.request("GET", endpoint(repo, ""))
     protection = api.request("GET", endpoint(repo, "branches/master/protection"))
     rulesets = api.request("GET", endpoint(repo, "rulesets?includes_parents=false&per_page=100"))
+    rulesets = [
+        api.request("GET", endpoint(repo, f"rulesets/{row['id']}"))
+        if row.get("name") == RULESET_NAME and row.get("id") is not None else row
+        for row in (rulesets or [])
+    ]
     return {
         "schema": "latchkey-repository-policy-snapshot/v1",
         "repo": repo,
@@ -114,7 +119,22 @@ def read_snapshot(path: str) -> dict:
 
 
 def normalized_ruleset(row: dict) -> dict:
-    return {key: row.get(key) for key in DESIRED_RULESET}
+    normalized = {key: row.get(key) for key in DESIRED_RULESET if key != "rules"}
+    expected_rules = {rule["type"]: rule for rule in DESIRED_RULESET["rules"]}
+    observed_rules = {rule["type"]: rule for rule in row.get("rules", [])}
+    normalized["rules"] = []
+    for rule_type, expected in expected_rules.items():
+        observed = observed_rules.get(rule_type, {})
+        item = {"type": rule_type}
+        if "parameters" in expected:
+            parameters = observed.get("parameters", {})
+            item["parameters"] = {
+                key: parameters.get(key) for key in expected["parameters"]
+            }
+        normalized["rules"].append(item)
+    if set(observed_rules) != set(expected_rules):
+        normalized["rules"].append({"unexpected_types": sorted(set(observed_rules) - set(expected_rules))})
+    return normalized
 
 
 def ensure_snapshot_current(snapshot: dict, current: dict) -> None:
