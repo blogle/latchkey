@@ -13,7 +13,8 @@ from typing import Any
 
 RULESET_NAME = "Latchkey master merge policy"
 MERGIFY_APP_ID = 10562
-MERGIFY_CHECK = "Mergify Merge Queue"
+GITHUB_ACTIONS_APP_ID = 15368
+CANDIDATE_CHECK = "candidate-ready"
 DESIRED_REPO = {
     "allow_squash_merge": True,
     "allow_merge_commit": False,
@@ -45,7 +46,10 @@ DESIRED_RULESET = {
         {"type": "deletion"},
         {"type": "required_status_checks", "parameters": {
             "do_not_enforce_on_create": False,
-            "required_status_checks": [{"context": MERGIFY_CHECK, "integration_id": MERGIFY_APP_ID}],
+            "required_status_checks": [{
+                "context": CANDIDATE_CHECK,
+                "integration_id": GITHUB_ACTIONS_APP_ID,
+            }],
             "strict_required_status_checks_policy": False,
         }},
     ],

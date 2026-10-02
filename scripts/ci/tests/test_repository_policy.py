@@ -100,7 +100,9 @@ class RepositoryPolicyTests(unittest.TestCase):
         }])
         checks = next(r for r in body["rules"] if r["type"] == "required_status_checks")
         self.assertEqual(checks["parameters"]["required_status_checks"],
-                         [{"context": "Mergify Merge Queue", "integration_id": 10562}])
+                         [{"context": "candidate-ready", "integration_id": 15368}])
+        self.assertNotEqual(checks["parameters"]["required_status_checks"],
+                            [{"context": "Mergify Merge Queue", "integration_id": 10562}])
         rules = {r["type"] for r in body["rules"]}
         self.assertNotIn("merge_queue", rules)
         self.assertEqual(body["conditions"]["ref_name"]["include"], ["refs/heads/master"])
@@ -128,6 +130,17 @@ class RepositoryPolicyTests(unittest.TestCase):
             *policy.DESIRED_RULESET["rules"][1:],
         ]
         self.assertEqual(policy.normalized_ruleset(current), policy.DESIRED_RULESET)
+
+        changed_check = dict(current)
+        changed_check["rules"] = list(current["rules"])
+        changed_status = dict(changed_check["rules"][-1])
+        changed_parameters = dict(changed_status["parameters"])
+        changed_parameters["required_status_checks"] = [{
+            "context": "candidate-ready", "integration_id": 10562,
+        }]
+        changed_status["parameters"] = changed_parameters
+        changed_check["rules"][-1] = changed_status
+        self.assertNotEqual(policy.normalized_ruleset(changed_check), policy.DESIRED_RULESET)
 
     def test_ruleset_normalization_accepts_only_the_exact_mergify_bypass_actor(self):
         current = dict(policy.DESIRED_RULESET, id=18, current_user_can_bypass="never")
