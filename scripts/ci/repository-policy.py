@@ -25,7 +25,11 @@ DESIRED_RULESET = {
     "name": RULESET_NAME,
     "target": "branch",
     "enforcement": "active",
-    "bypass_actors": [],
+    "bypass_actors": [{
+        "actor_id": MERGIFY_APP_ID,
+        "actor_type": "Integration",
+        "bypass_mode": "pull_request",
+    }],
     "conditions": {"ref_name": {"include": ["refs/heads/master"], "exclude": []}},
     "rules": [
         {"type": "pull_request", "parameters": {
@@ -75,6 +79,11 @@ def take_snapshot(api: Gh, repo: str) -> dict:
     info = api.request("GET", endpoint(repo, ""))
     protection = api.request("GET", endpoint(repo, "branches/master/protection"))
     rulesets = api.request("GET", endpoint(repo, "rulesets?includes_parents=false&per_page=100"))
+    rulesets = [
+        api.request("GET", endpoint(repo, f"rulesets/{row['id']}"))
+        if row.get("name") == RULESET_NAME and row.get("id") is not None else row
+        for row in (rulesets or [])
+    ]
     return {
         "schema": "latchkey-repository-policy-snapshot/v1",
         "repo": repo,
@@ -98,7 +107,7 @@ def diff(snapshot: dict, current: dict) -> dict:
         "ruleset": {
             "name": RULESET_NAME,
             "operation": "unchanged" if any(r.get("name") == RULESET_NAME and
-                canonical({k: r.get(k) for k in DESIRED_RULESET}) == canonical(DESIRED_RULESET)
+                canonical(normalized_ruleset(r)) == canonical(DESIRED_RULESET)
                 for r in current["rulesets"]) else "create-or-update",
             "desired": DESIRED_RULESET,
         },
@@ -114,7 +123,26 @@ def read_snapshot(path: str) -> dict:
 
 
 def normalized_ruleset(row: dict) -> dict:
-    return {key: row.get(key) for key in DESIRED_RULESET}
+    normalized = {key: row.get(key) for key in DESIRED_RULESET if key != "rules"}
+    normalized["bypass_actors"] = [
+        {key: actor.get(key) for key in ("actor_id", "actor_type", "bypass_mode")}
+        for actor in row.get("bypass_actors", [])
+    ]
+    expected_rules = {rule["type"]: rule for rule in DESIRED_RULESET["rules"]}
+    observed_rules = {rule["type"]: rule for rule in row.get("rules", [])}
+    normalized["rules"] = []
+    for rule_type, expected in expected_rules.items():
+        observed = observed_rules.get(rule_type, {})
+        item = {"type": rule_type}
+        if "parameters" in expected:
+            parameters = observed.get("parameters", {})
+            item["parameters"] = {
+                key: parameters.get(key) for key in expected["parameters"]
+            }
+        normalized["rules"].append(item)
+    if set(observed_rules) != set(expected_rules):
+        normalized["rules"].append({"unexpected_types": sorted(set(observed_rules) - set(expected_rules))})
+    return normalized
 
 
 def ensure_snapshot_current(snapshot: dict, current: dict) -> None:

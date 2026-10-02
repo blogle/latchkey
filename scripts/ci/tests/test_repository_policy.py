@@ -38,6 +38,9 @@ class FakeGh:
             return self.snapshot["branch_protection"]
         if method == "GET" and endpoint.endswith("/rulesets?includes_parents=false&per_page=100"):
             return self.snapshot["rulesets"]
+        if method == "GET" and "/rulesets/" in endpoint:
+            ruleset_id = int(endpoint.rsplit("/", 1)[1])
+            return next(row for row in self.snapshot["rulesets"] if row.get("id") == ruleset_id)
         if method == "GET" and endpoint == "repos/blogle/latchkey":
             return {"default_branch": self.snapshot["default_branch"],
                     **self.snapshot["settings"], "permissions": {"admin": self.admin}}
@@ -86,13 +89,15 @@ class RepositoryPolicyTests(unittest.TestCase):
             policy.apply_policy(api, "blogle/latchkey", baseline)
         self.assertEqual(api.writes, [])
 
-    def test_apply_posts_squash_rules_without_bypass_and_is_repeatable(self):
+    def test_apply_posts_squash_rules_with_only_mergify_bypass_and_is_repeatable(self):
         api = FakeGh()
         policy.apply_policy(api, "blogle/latchkey", initial_snapshot())
         method, endpoint, body = api.writes[-1]
         self.assertEqual(method, "POST")
         self.assertEqual(endpoint, "repos/blogle/latchkey/rulesets")
-        self.assertEqual(body["bypass_actors"], [])
+        self.assertEqual(body["bypass_actors"], [{
+            "actor_id": 10562, "actor_type": "Integration", "bypass_mode": "pull_request",
+        }])
         checks = next(r for r in body["rules"] if r["type"] == "required_status_checks")
         self.assertEqual(checks["parameters"]["required_status_checks"],
                          [{"context": "Mergify Merge Queue", "integration_id": 10562}])
@@ -104,10 +109,43 @@ class RepositoryPolicyTests(unittest.TestCase):
         baseline = initial_snapshot()
         state = dict(baseline)
         state["settings"] = dict(policy.DESIRED_REPO)
-        state["rulesets"] = [dict(policy.DESIRED_RULESET, id=18)]
+        state["rulesets"] = [dict(policy.DESIRED_RULESET, id=18, current_user_can_bypass="never")]
+        state["rulesets"][0]["bypass_actors"] = [{
+            **policy.DESIRED_RULESET["bypass_actors"][0], "actor_name": "Mergify",
+        }]
         api = FakeGh(state)
+        self.assertEqual(policy.diff(baseline, state)["ruleset"]["operation"], "unchanged")
         policy.apply_policy(api, "blogle/latchkey", baseline)
         self.assertEqual(api.writes, [])
+
+    def test_ruleset_normalization_ignores_github_added_defaults(self):
+        current = dict(policy.DESIRED_RULESET, id=18, current_user_can_bypass="never")
+        current["rules"] = [
+            {"type": "pull_request", "parameters": {
+                **policy.DESIRED_RULESET["rules"][0]["parameters"],
+                "required_reviewers": [], "require_extra_approval_for_unattributed_changes": True,
+            }},
+            *policy.DESIRED_RULESET["rules"][1:],
+        ]
+        self.assertEqual(policy.normalized_ruleset(current), policy.DESIRED_RULESET)
+
+    def test_ruleset_normalization_accepts_only_the_exact_mergify_bypass_actor(self):
+        current = dict(policy.DESIRED_RULESET, id=18, current_user_can_bypass="never")
+        current["bypass_actors"] = [{
+            **policy.DESIRED_RULESET["bypass_actors"][0], "actor_name": "Mergify",
+        }]
+        self.assertEqual(policy.normalized_ruleset(current), policy.DESIRED_RULESET)
+
+        invalid_actor_lists = (
+            [{"actor_id": 10562, "actor_type": "User", "bypass_mode": "pull_request"}],
+            [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}],
+            [policy.DESIRED_RULESET["bypass_actors"][0],
+             {"actor_id": 1, "actor_type": "User", "bypass_mode": "always"}],
+        )
+        for actors in invalid_actor_lists:
+            with self.subTest(actors=actors):
+                current["bypass_actors"] = actors
+                self.assertNotEqual(policy.normalized_ruleset(current), policy.DESIRED_RULESET)
 
     def test_apply_requires_admin(self):
         with self.assertRaisesRegex(ValueError, "admin permission"):
