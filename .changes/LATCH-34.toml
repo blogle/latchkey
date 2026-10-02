@@ -1,0 +1,2 @@
+category = "Fixed"
+summary = "Guard the Mergify master merge-queue contract with a regression test"
