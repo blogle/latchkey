@@ -115,6 +115,9 @@ class CandidateTests(unittest.TestCase):
             stale_head = [dict(requested[0]), {"number": 2, "head_sha": SHA_C}]
             with self.assertRaisesRegex(ValueError, "prefix/artifact validation"):
                 candidate.validate_evidence(document, evidence_dir, stale_head, suites)
+            changed_number = [{"number": 99, "head_sha": SHA_A}, dict(requested[1])]
+            with self.assertRaisesRegex(ValueError, "prefix/artifact validation"):
+                candidate.validate_evidence(document, evidence_dir, changed_number, suites)
             with self.assertRaisesRegex(ValueError, "prefix/artifact validation"):
                 candidate.validate_evidence(document, evidence_dir, list(reversed(requested)), suites)
 
