@@ -173,6 +173,44 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "every prefix must pass"):
             candidate.validate_batch(base, tree, [a, b], evidence)
 
+    def test_verified_stacked_queue_base_reconstructs_one_linear_sequence(self):
+        temp, repo, base, a, b, tree = self._repo()
+        self.addCleanup(temp.cleanup)
+        base_tree = subprocess.run(["git", "rev-parse", f"{a}^{{tree}}"], cwd=repo,
+                                   check=True, text=True, capture_output=True).stdout.strip()
+        # Mergify's synthetic base has two parents, but its tree is exactly
+        # PR A's tree and its provenance is separately supplied by the API.
+        synthetic_base = subprocess.run(
+            ["git", "commit-tree", base_tree, "-p", base, "-p", a], cwd=repo,
+            input="Merge of #28\n", check=True, text=True, capture_output=True,
+        ).stdout.strip()
+        self.assertEqual(len(subprocess.run(["git", "rev-list", "--parents", "-n", "1", synthetic_base],
+                                            cwd=repo, check=True, text=True, capture_output=True).stdout.split()), 3)
+        sequence = candidate.normalize_pr_sequence(
+            [{"number": 28, "head_sha": a, "base_sha": base}],
+            [{"number": 29, "head_sha": b, "base_sha": a}],
+        )
+        prefixes = candidate.reconstruct_prefixes(repo, base, sequence, tree, base_tree, 1)
+        self.assertEqual([row["head_sha"] for row in prefixes], [a, b])
+        self.assertEqual(prefixes[0]["tree"], base_tree)
+        self.assertEqual(prefixes[-1]["tree"], tree)
+        for row in prefixes:
+            parents = subprocess.run(["git", "rev-list", "--parents", "-n", "1", row["commit"]],
+                                     cwd=repo, check=True, text=True, capture_output=True).stdout.split()
+            self.assertEqual(len(parents), 2)
+
+    def test_unverified_merge_base_rejected_without_stack_provenance(self):
+        temp, repo, base, a, _b, _tree = self._repo()
+        self.addCleanup(temp.cleanup)
+        tree = subprocess.run(["git", "rev-parse", f"{a}^{{tree}}"], cwd=repo,
+                              check=True, text=True, capture_output=True).stdout.strip()
+        merge = subprocess.run(["git", "commit-tree", tree, "-p", base, "-p", a], cwd=repo,
+                               input="Mergify Merge of #999\n", check=True, text=True,
+                               capture_output=True).stdout.strip()
+        with self.assertRaisesRegex(ValueError, "must not be a merge"):
+            candidate.reconstruct_prefixes(repo, merge,
+                [{"number": 30, "head_sha": a, "base_sha": base}], tree)
+
     def test_manual_dispatch_is_allowlisted_and_exact(self):
         batch = {"base_sha": SHA_B, "requested_tree": TREE,
                  "pull_requests": [{"number": 1, "head_sha": SHA_A, "base_sha": SHA_B}]}
@@ -269,9 +307,10 @@ files = subprocess.check_output(["git", "-C", root, "ls-tree", "-r", "--name-onl
 print(json.dumps({"tree": tree, "version": f"9.8.{len(files)}"}))
 ''')
         batch = root / "batch.json"
+        base_tree = git("rev-parse", f"{heads[0]}^{{tree}}")
         batch.write_text(json.dumps({"schema":"latchkey-candidate-batch/v1", "base_sha":base,
-            "requested_tree":tree,"pull_requests":[{"number":1,"head_sha":heads[0],"base_sha":base},
-                {"number":2,"head_sha":heads[1],"base_sha":heads[0]}]}))
+            "base_tree":base_tree, "base_stack":[{"number":1,"head_sha":heads[0],"base_sha":base}],
+            "requested_tree":tree,"pull_requests":[{"number":2,"head_sha":heads[1],"base_sha":heads[0]}]}))
         tools = root / "tools"
         tools.mkdir()
         cargo = tools / "cargo"
@@ -332,6 +371,12 @@ binary.chmod(0o755)
         command = [sys.executable, str(repo / "scripts/ci/candidate.py"), "run", "--repository", str(repo),
                    "--trusted", str(trusted), "--source", str(repo), "--batch", str(batch), "--requested-sha", heads[-1],
                    "--evidence", str(evidence)]
+        cache_command = [sys.executable, str(repo / "scripts/ci/candidate.py"), "cache-key",
+                         "--repository", str(repo), "--trusted", str(trusted),
+                         "--source", str(repo), "--batch", str(batch)]
+        cache_key = subprocess.run(cache_command, cwd=repo, env=env, check=True, text=True,
+                                   capture_output=True).stdout.strip()
+        self.assertTrue(cache_key.startswith("prefix-target-"))
         subprocess.run(command, cwd=repo, env=env, check=True)
         manifest = json.loads((evidence / "manifest.json").read_text())
         versions = [p["release_version"] for p in manifest["ordered_prs"]]

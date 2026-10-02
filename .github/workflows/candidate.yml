@@ -150,11 +150,11 @@ jobs:
       - name: Fetch verified batch objects
         run: |
           set -euo pipefail
-          python3 -c 'import json; print("\n".join(x["head_sha"] for x in json.load(open("/tmp/candidate-batch.json"))["pull_requests"]))' | while read -r sha; do git -C candidate fetch --no-tags origin "$sha"; done
+          python3 -c 'import json; b=json.load(open("/tmp/candidate-batch.json")); print("\n".join(x["head_sha"] for x in b.get("base_stack", []) + b["pull_requests"]))' | while read -r sha; do git -C candidate fetch --no-tags origin "$sha"; done
           git -C candidate fetch --no-tags origin "$(python3 -c 'import json; print(json.load(open("/tmp/candidate-batch.json"))["base_sha"])')"
       - uses: DeterminateSystems/nix-installer-action@v23
         with:
-          extra_nix_config: |
+          extra-conf: |
             substituters = https://cache.nixos.org/ https://nix-community.cachix.org
             trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
       - uses: Mic92/hestia@v3
