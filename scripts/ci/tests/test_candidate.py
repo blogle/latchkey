@@ -87,6 +87,40 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "order"):
             candidate.validate_batch(SHA_C, TREE, [SHA_A, SHA_B], prefixes)
 
+    def test_candidate_evidence_is_bound_to_exact_ordered_heads(self):
+        with tempfile.TemporaryDirectory(prefix="candidate-evidence-binding-") as temp:
+            evidence_dir = Path(temp)
+            artifacts = evidence_dir / "artifacts"
+            artifacts.mkdir()
+            artifact = artifacts / "prefix-1.tar"
+            artifact.write_bytes(b"candidate artifact")
+            suites = ["just script-test candidate"]
+            requested = [{"number": 1, "head_sha": SHA_A},
+                         {"number": 2, "head_sha": SHA_B}]
+            records = [{"number": row["number"], "head_sha": row["head_sha"],
+                        "synthetic_sha": SHA_C, "tree": TREE, "release_version": "1.2.3",
+                        "result": "passed", "suite_results": [{"command": suites[0], "result": "passed"}],
+                        "artifact": {"filename": "artifacts/prefix-1.tar",
+                                     "sha256": candidate.digest(artifact.read_bytes())}}
+                       for row in requested]
+            document = {"schema": "latchkey-candidate-evidence/v1", "final_result": "passed",
+                        "base_sha": SHA_C, "candidate_sha": SHA_B, "candidate_tree": TREE,
+                        "ordered_prs": records,
+                        "fingerprints": {"cargo_lock_sha256": "e" * 64,
+                                         "toolchain_sha256": "f" * 64,
+                                         "features_sha256": "1" * 64, "profile": "ci"},
+                        "artifact_name": "candidate.tar"}
+
+            candidate.validate_evidence(document, evidence_dir, requested, suites)
+            stale_head = [dict(requested[0]), {"number": 2, "head_sha": SHA_C}]
+            with self.assertRaisesRegex(ValueError, "prefix/artifact validation"):
+                candidate.validate_evidence(document, evidence_dir, stale_head, suites)
+            changed_number = [{"number": 99, "head_sha": SHA_A}, dict(requested[1])]
+            with self.assertRaisesRegex(ValueError, "prefix/artifact validation"):
+                candidate.validate_evidence(document, evidence_dir, changed_number, suites)
+            with self.assertRaisesRegex(ValueError, "prefix/artifact validation"):
+                candidate.validate_evidence(document, evidence_dir, list(reversed(requested)), suites)
+
     def test_missing_cancelled_and_failed_child_checks_rejected(self):
         for children, expected_message in [([], "missing"),
                 ([{"name": "prefix-1", "status": "cancelled"}], "cancelled"),
