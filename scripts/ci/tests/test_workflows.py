@@ -27,6 +27,8 @@ class WorkflowBootstrapTests(unittest.TestCase):
         )
         self.assertIn("--working-directory \"$GITHUB_WORKSPACE/candidate\" pr-check", workflow)
         self.assertIn("--working-directory \"$GITHUB_WORKSPACE/candidate\" test-integration contracts", workflow)
+        self.assertIn("extra-conf: |", workflow)
+        self.assertNotIn("extra_nix_config:", workflow)
 
     def test_candidate_bootstrap_and_credentials_are_narrowly_scoped(self):
         workflow = (ROOT / ".github/workflows/candidate.yml").read_text()
@@ -50,6 +52,9 @@ class WorkflowBootstrapTests(unittest.TestCase):
         self.assertIn('candidate_script="$GITHUB_WORKSPACE/candidate/scripts/ci/candidate.py"', workflow)
         self.assertIn("GH_TOKEN: ${{ github.token }}", workflow)
         self.assertIn("pull-requests: read", workflow)
+        self.assertIn('b.get("base_stack", []) + b["pull_requests"]', workflow)
+        self.assertIn("extra-conf: |", workflow)
+        self.assertNotIn("extra_nix_config:", workflow)
 
     def test_dispatch_candidate_sha_can_differ_from_final_pr_head_but_tree_is_exact(self):
         workflow = (ROOT / ".github/workflows/candidate.yml").read_text()
