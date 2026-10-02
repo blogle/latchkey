@@ -1,0 +1,2 @@
+category = "Fixed"
+summary = "Prove Mergify blocks candidate prefixes when a trusted script-test gate fails"
