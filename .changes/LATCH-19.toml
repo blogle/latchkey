@@ -1,0 +1,3 @@
+category = "Added"
+summary = "Add stateless rmcp Streamable HTTP server with search and exec"
+bump = "patch"
