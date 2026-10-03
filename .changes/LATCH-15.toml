@@ -1,0 +1,3 @@
+category = "Added"
+summary = "Add standalone TOML configuration loading and safe reload behavior"
+bump = "patch"
