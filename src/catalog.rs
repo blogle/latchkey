@@ -1,6 +1,6 @@
 //! Atomic, copy-on-write tool catalog.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -19,6 +19,19 @@ pub struct CatalogStore {
     snapshot: ArcSwap<CatalogSnapshot>,
     write: Mutex<()>,
     next_epoch: AtomicU64,
+    next_fence: AtomicU64,
+    fences: Mutex<BTreeMap<ServiceId, RevisionFence>>,
+}
+
+/// Capability authorizing catalog mutations for one service revision.
+///
+/// A fence remains recorded after deletion, so an in-flight operation from a
+/// removed service cannot recreate it or close a replacement route.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevisionFence {
+    service: ServiceId,
+    revision: crate::contracts::Revision,
+    sequence: u64,
 }
 
 impl CatalogStore {
@@ -28,27 +41,57 @@ impl CatalogStore {
             snapshot: ArcSwap::from_pointee(CatalogSnapshot::empty(0)),
             write: Mutex::new(()),
             next_epoch: AtomicU64::new(0),
+            next_fence: AtomicU64::new(0),
+            fences: Mutex::new(BTreeMap::new()),
         })
     }
 
-    /// Publish one service's discovery result atomically.
+    /// Start a new revision and immediately close the previous route.
+    pub fn begin_revision(&self, service: Arc<ResolvedService>) -> RevisionFence {
+        let _guard = self.write.lock().expect("catalog writer lock poisoned");
+        let sequence = self.next_fence.fetch_add(1, Ordering::Relaxed) + 1;
+        let fence = RevisionFence {
+            service: service.spec.id.clone(),
+            revision: service.revision.clone(),
+            sequence,
+        };
+        self.fences
+            .lock()
+            .expect("catalog fence lock poisoned")
+            .insert(fence.service.clone(), fence.clone());
+        if let Some(route) = self.snapshot.load().routes.get(&fence.service) {
+            route.set_accepting(false);
+        }
+        fence
+    }
+
+    /// Publish one service's discovery result, starting a new fenced revision.
     pub fn publish(
         &self,
         service: Arc<ResolvedService>,
         tools: Vec<Tool>,
-    ) -> Result<(), GatewayError> {
-        self.publish_with_admission(service, tools, true)
+    ) -> Result<bool, GatewayError> {
+        let fence = self.begin_revision(Arc::clone(&service));
+        self.publish_fenced(&fence, service, tools, true)
     }
 
     /// Publish one service and choose whether its route accepts new calls.
-    pub fn publish_with_admission(
+    /// Returns `false` when the discovery completion is stale.
+    pub fn publish_fenced(
         &self,
+        fence: &RevisionFence,
         service: Arc<ResolvedService>,
         tools: Vec<Tool>,
         accepting: bool,
-    ) -> Result<(), GatewayError> {
+    ) -> Result<bool, GatewayError> {
         let prepared = prepare_entries(&service, tools)?;
         let _guard = self.write.lock().expect("catalog writer lock poisoned");
+        if !self.fence_is_current_locked(fence)
+            || fence.service != service.spec.id
+            || fence.revision != service.revision
+        {
+            return Ok(false);
+        }
         let current = self.snapshot.load_full();
         let mut next = (*current).clone();
         remove_service_from(&mut next, &service.spec.id);
@@ -79,25 +122,43 @@ impl CatalogStore {
             next.entries.insert(entry.name.clone(), entry);
         }
         self.store_next(next);
-        Ok(())
+        Ok(true)
     }
 
-    /// Remove a service and all of its descriptors.
-    pub fn remove(&self, service: &ServiceId) {
+    /// Remove a service and all of its descriptors if the fence is current.
+    pub fn remove_fenced(&self, fence: &RevisionFence) -> bool {
         let _guard = self.write.lock().expect("catalog writer lock poisoned");
+        if !self.fence_is_current_locked(fence) {
+            return false;
+        }
         let current = self.snapshot.load_full();
         let mut next = (*current).clone();
-        if next.routes.contains_key(service) {
-            remove_service_from(&mut next, service);
+        if next.routes.contains_key(&fence.service) {
+            remove_service_from(&mut next, &fence.service);
             self.store_next(next);
         }
+        true
     }
 
-    /// Close an existing route immediately, preserving last-known descriptors.
-    pub fn set_accepting(&self, service: &ServiceId, accepting: bool) {
-        if let Some(route) = self.snapshot.load().routes.get(service) {
+    /// Close or open a route only for its current revision fence.
+    pub fn set_accepting_fenced(&self, fence: &RevisionFence, accepting: bool) -> bool {
+        let _guard = self.write.lock().expect("catalog writer lock poisoned");
+        if !self.fence_is_current_locked(fence) {
+            return false;
+        }
+        if let Some(route) = self.snapshot.load().routes.get(&fence.service) {
             route.set_accepting(accepting);
         }
+        true
+    }
+
+    /// Whether this mutation capability is still the active one.
+    pub fn fence_is_current(&self, fence: &RevisionFence) -> bool {
+        self.fences
+            .lock()
+            .expect("catalog fence lock poisoned")
+            .get(&fence.service)
+            == Some(fence)
     }
 
     /// Return a stable copy of the current snapshot for tests and composition.
@@ -115,6 +176,14 @@ impl CatalogStore {
         let epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed) + 1;
         next.epoch = epoch;
         self.snapshot.store(Arc::new(next));
+    }
+
+    fn fence_is_current_locked(&self, fence: &RevisionFence) -> bool {
+        self.fences
+            .lock()
+            .expect("catalog fence lock poisoned")
+            .get(&fence.service)
+            == Some(fence)
     }
 }
 
@@ -154,9 +223,9 @@ fn prepare_entries(
         entries.push(CatalogEntry {
             name,
             service: service.spec.id.clone(),
-            description: tool.description.unwrap_or_default(),
-            input_schema: tool.input_schema,
-            downstream_name: tool.name,
+            description: tool.description.unwrap_or_default().to_string(),
+            input_schema: (*tool.input_schema).clone(),
+            downstream_name: tool.name.to_string(),
             revision: service.revision.clone(),
         });
     }
@@ -209,7 +278,7 @@ mod tests {
 
     fn tool(name: &str) -> Tool {
         Tool::new(
-            name,
+            name.to_owned(),
             "description",
             serde_json::Map::from_iter([(String::from("type"), json!("object"))]),
         )
@@ -253,12 +322,63 @@ mod tests {
     fn disabling_route_preserves_descriptors_but_closes_admission() {
         let catalog = CatalogStore::new();
         let id = ServiceId::new("one");
+        let fence = catalog.begin_revision(service("one", "one", 1));
         catalog
-            .publish(service("one", "one", 1), vec![tool("run")])
+            .publish_fenced(&fence, service("one", "one", 1), vec![tool("run")], true)
             .unwrap();
-        catalog.set_accepting(&id, false);
+        assert!(catalog.set_accepting_fenced(&fence, false));
         let snapshot = catalog.current();
         assert!(!snapshot.routes[&id].is_accepting());
         assert!(snapshot.entries.contains_key("one__run"));
+    }
+
+    #[test]
+    fn stale_fence_cannot_publish_or_remove_a_recreated_service() {
+        let catalog = CatalogStore::new();
+        let old = service("one", "one", 1);
+        let old_fence = catalog.begin_revision(old.clone());
+        let mut recreated = (*service("one", "one", 2)).clone();
+        recreated.revision.source_uid = "new-source".to_owned();
+        let recreated = Arc::new(recreated);
+        let new_fence = catalog.begin_revision(recreated.clone());
+        assert!(
+            !catalog
+                .publish_fenced(&old_fence, old, vec![tool("old")], true)
+                .unwrap()
+        );
+        assert!(
+            catalog
+                .publish_fenced(&new_fence, recreated, vec![tool("new")], true)
+                .unwrap()
+        );
+        assert!(!catalog.remove_fenced(&old_fence));
+        assert!(!catalog.set_accepting_fenced(&old_fence, false));
+        let snapshot = catalog.current();
+        assert!(snapshot.routes[&ServiceId::new("one")].is_accepting());
+        assert!(snapshot.entries.contains_key("one__new"));
+        assert!(!snapshot.entries.contains_key("one__old"));
+    }
+
+    #[test]
+    fn concurrent_publications_keep_unrelated_services() {
+        let catalog = CatalogStore::new();
+        let mut workers = Vec::new();
+        for id in ["one", "two", "three", "four"] {
+            let catalog = Arc::clone(&catalog);
+            workers.push(std::thread::spawn(move || {
+                catalog
+                    .publish(service(id, id, 1), vec![tool("run")])
+                    .unwrap();
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let snapshot = catalog.current();
+        assert_eq!(snapshot.service_count(), 4);
+        assert_eq!(snapshot.tool_count(), 4);
+        for id in ["one", "two", "three", "four"] {
+            assert!(snapshot.entries.contains_key(&format!("{id}__run")));
+        }
     }
 }
