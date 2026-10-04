@@ -12,6 +12,8 @@ use axum::http::{Request, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any_service;
+#[allow(deprecated)]
+use ring::constant_time::verify_slices_are_equal;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, Implementation, ListToolsResult,
@@ -177,23 +179,45 @@ impl ServerHandler for GatewayHandler {
         );
         let result = if name == "search" {
             let request = serde_json::from_value::<SearchRequest>(Value::Object(arguments))
-                .map_err(|_| rmcp::ErrorData::invalid_params("invalid search arguments", None))?;
+                .map_err(|_| {
+                    stable_error(
+                        rmcp::model::ErrorCode::INVALID_PARAMS,
+                        "invalid-input",
+                        "invalid search arguments",
+                    )
+                })?;
             tokio::select! {
                 _ = context.ct.cancelled() => Err(GatewayError::Cancelled),
-                result = self.gateway.search(request) => result.map(search_result),
+                result = tokio::time::timeout(self.deadline, self.gateway.search(request)) => {
+                    match result {
+                        Ok(result) => result.map(search_result),
+                        Err(_) => Err(GatewayError::Timeout),
+                    }
+                },
             }
         } else if name == "exec" {
-            let request = serde_json::from_value::<ExecRequest>(Value::Object(arguments))
-                .map_err(|_| rmcp::ErrorData::invalid_params("invalid exec arguments", None))?;
+            let request =
+                serde_json::from_value::<ExecRequest>(Value::Object(arguments)).map_err(|_| {
+                    stable_error(
+                        rmcp::model::ErrorCode::INVALID_PARAMS,
+                        "invalid-input",
+                        "invalid exec arguments",
+                    )
+                })?;
             tokio::select! {
                 _ = context.ct.cancelled() => Err(GatewayError::Cancelled),
-                result = self.gateway.exec(request, exec_context) => result,
+                result = tokio::time::timeout(self.deadline, self.gateway.exec(request, exec_context)) => {
+                    match result {
+                        Ok(result) => result,
+                        Err(_) => Err(GatewayError::Timeout),
+                    }
+                },
             }
         } else {
-            return Err(rmcp::ErrorData::new(
+            return Err(stable_error(
                 rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                "unknown-tool",
                 "unknown gateway tool",
-                None,
             ));
         };
         result.map_err(to_mcp_error)
@@ -212,16 +236,54 @@ fn search_result(hits: Vec<crate::contracts::SearchHit>) -> CallToolResponse {
 fn to_mcp_error(error: GatewayError) -> rmcp::ErrorData {
     match error {
         GatewayError::Downstream(error) => error,
-        GatewayError::InvalidInput(_) => rmcp::ErrorData::invalid_params(error.to_string(), None),
-        GatewayError::UnknownTool(_) => rmcp::ErrorData::new(
-            rmcp::model::ErrorCode::METHOD_NOT_FOUND,
-            "unknown gateway tool",
-            None,
+        GatewayError::InvalidInput(_) => stable_error(
+            rmcp::model::ErrorCode::INVALID_PARAMS,
+            "invalid-input",
+            "invalid gateway input",
         ),
-        GatewayError::Timeout => rmcp::ErrorData::internal_error("gateway deadline exceeded", None),
-        GatewayError::Cancelled => rmcp::ErrorData::internal_error("request cancelled", None),
-        _ => rmcp::ErrorData::internal_error("gateway request unavailable", None),
+        GatewayError::UnknownTool(_) => stable_error(
+            rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+            "unknown-tool",
+            "unknown gateway tool",
+        ),
+        GatewayError::Timeout => stable_error(
+            rmcp::model::ErrorCode::INTERNAL_ERROR,
+            "timeout",
+            "gateway deadline exceeded",
+        ),
+        GatewayError::Cancelled => stable_error(
+            rmcp::model::ErrorCode::INVALID_REQUEST,
+            "cancelled",
+            "request cancelled",
+        ),
+        GatewayError::Overloaded => stable_error(
+            rmcp::model::ErrorCode::INTERNAL_ERROR,
+            "overloaded",
+            "gateway request unavailable",
+        ),
+        GatewayError::Unavailable(_) => stable_error(
+            rmcp::model::ErrorCode::INTERNAL_ERROR,
+            "unavailable",
+            "gateway request unavailable",
+        ),
+        GatewayError::UnsupportedCapability(_) => stable_error(
+            rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+            "unsupported-capability",
+            "gateway capability unavailable",
+        ),
     }
+}
+
+fn stable_error(
+    code: rmcp::model::ErrorCode,
+    category: &'static str,
+    message: &'static str,
+) -> rmcp::ErrorData {
+    rmcp::ErrorData::new(
+        code,
+        message,
+        Some(serde_json::json!({ "category": category })),
+    )
 }
 
 async fn authenticate(request: Request<Body>, next: Next, auth: AuthConfig) -> Response {
@@ -233,12 +295,17 @@ async fn authenticate(request: Request<Body>, next: Next, auth: AuthConfig) -> R
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|value| value == expected.as_ref());
+        .is_some_and(|value| constant_time_equal(value.as_bytes(), expected.as_bytes()));
     if valid {
         next.run(request).await
     } else {
         StatusCode::UNAUTHORIZED.into_response()
     }
+}
+
+#[allow(deprecated)]
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    verify_slices_are_equal(left, right).is_ok()
 }
 
 #[cfg(test)]

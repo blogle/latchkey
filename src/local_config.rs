@@ -1,11 +1,13 @@
 //! Standalone TOML configuration source.
 
-use std::collections::{HashSet, hash_map::DefaultHasher};
-use std::hash::{Hash, Hasher};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ring::hmac;
+use ring::rand::SecureRandom;
 use serde::Deserialize;
 use tokio::sync::watch;
 use tokio::time::{MissedTickBehavior, interval};
@@ -58,7 +60,7 @@ impl ConfigSource for LocalSource {
         loop {
             match self.load(revision) {
                 Ok((snapshot, healthy)) => {
-                    let changed = last_good.as_ref().is_none_or(|previous| {
+                    let unchanged = last_good.as_ref().is_some_and(|previous| {
                         previous
                             .services
                             .iter()
@@ -68,6 +70,7 @@ impl ConfigSource for LocalSource {
                                 .iter()
                                 .map(|service| (&service.spec, &service.headers)))
                     });
+                    let changed = !unchanged;
                     if changed {
                         let mut published = snapshot;
                         published.revision = revision;
@@ -104,6 +107,7 @@ impl ConfigSource for LocalSource {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     version: u32,
     #[serde(default)]
@@ -111,6 +115,7 @@ struct RawConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawService {
     id: String,
     #[serde(default)]
@@ -121,18 +126,18 @@ struct RawService {
     timeout: String,
     #[serde(default = "default_refresh")]
     refresh_interval: String,
-    #[serde(default, alias = "headersFrom")]
+    #[serde(default)]
     headers: Vec<RawHeader>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawHeader {
-    #[serde(alias = "name")]
-    header: String,
+    name: String,
     #[serde(default)]
-    file: Option<String>,
+    value_file: Option<String>,
     #[serde(default)]
-    env: Option<String>,
+    value_env: Option<String>,
 }
 
 fn default_enabled() -> bool {
@@ -173,7 +178,11 @@ fn normalize(
         }
         let endpoint = Url::parse(&raw_service.endpoint)
             .map_err(|_| GatewayError::InvalidInput("service endpoint is invalid".to_owned()))?;
-        if !matches!(endpoint.scheme(), "http" | "https") || endpoint.host_str().is_none() {
+        if !matches!(endpoint.scheme(), "http" | "https")
+            || endpoint.host_str().is_none()
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+        {
             return Err(GatewayError::InvalidInput(
                 "service endpoint must be http or https".to_owned(),
             ));
@@ -186,6 +195,9 @@ fn normalize(
         )?;
         let (headers, service_healthy) = resolve_headers(&raw_service.headers, config_path)?;
         healthy &= service_healthy;
+        let Some(headers) = headers else {
+            continue;
+        };
         let credential_revision = header_revision(&headers);
         services.push(ResolvedService {
             spec: ServiceSpec {
@@ -236,44 +248,85 @@ fn parse_duration(value: &str, field: &str, max: Duration) -> Result<Duration, G
 fn resolve_headers(
     headers: &[RawHeader],
     config_path: &Path,
-) -> Result<(SensitiveHeaders, bool), GatewayError> {
+) -> Result<(Option<SensitiveHeaders>, bool), GatewayError> {
     let base = config_path.parent().unwrap_or_else(|| Path::new("."));
     let mut resolved = Vec::with_capacity(headers.len());
     let mut healthy = true;
     let mut names = HashSet::new();
     for header in headers {
-        if header.header.is_empty() || !names.insert(header.header.to_ascii_lowercase()) {
+        if header.name.is_empty() || !names.insert(header.name.to_ascii_lowercase()) {
             return Err(GatewayError::InvalidInput(
                 "header names must be unique and non-empty".to_owned(),
             ));
         }
-        if header.file.is_some() == header.env.is_some() {
+        if header.value_file.is_some() == header.value_env.is_some() {
             return Err(GatewayError::InvalidInput(
                 "each header needs one file or environment reference".to_owned(),
             ));
         }
-        let value = if let Some(file) = &header.file {
-            std::fs::read_to_string(base.join(file))
-                .map(|value| value.trim_end_matches(['\r', '\n']).to_owned())
+        let value = if let Some(file) = &header.value_file {
+            std::fs::read(base.join(file)).map(|value| strip_one_line_ending(&value))
         } else {
-            std::env::var(header.env.as_deref().unwrap_or_default())
-                .map_err(|_| std::io::Error::other("missing"))
+            std::env::var_os(header.value_env.as_deref().unwrap_or_default())
+                .map(|value| value.to_string_lossy().as_bytes().to_vec())
+                .ok_or_else(|| std::io::Error::other("missing"))
         };
         match value {
-            Ok(value) if !value.is_empty() => resolved.push((header.header.clone(), value)),
+            Ok(value) if !value.is_empty() && !contains_line_break(&value) => {
+                match String::from_utf8(value) {
+                    Ok(value) => resolved.push((header.name.clone(), value)),
+                    Err(_) => healthy = false,
+                }
+            }
             _ => healthy = false,
         }
     }
-    Ok((SensitiveHeaders::new(resolved), healthy))
+    if healthy {
+        Ok((Some(SensitiveHeaders::new(resolved)), true))
+    } else {
+        Ok((None, false))
+    }
 }
 
 fn header_revision(headers: &SensitiveHeaders) -> String {
-    let mut hasher = DefaultHasher::new();
-    headers.iter().for_each(|(name, value)| {
-        name.hash(&mut hasher);
-        value.hash(&mut hasher);
+    static KEY: OnceLock<[u8; 32]> = OnceLock::new();
+    let key = KEY.get_or_init(|| {
+        let mut key = [0_u8; 32];
+        let rng = ring::rand::SystemRandom::new();
+        if rng.fill(&mut key).is_err() {
+            // This branch is not expected on supported platforms. The key is
+            // process-local and the revision remains opaque either way.
+            key.copy_from_slice(b"latchkey-revision-key-fallback-1");
+        }
+        key
     });
-    format!("{:x}", hasher.finish())
+    let signing_key = hmac::Key::new(hmac::HMAC_SHA256, key);
+    let mut input = Vec::new();
+    headers.iter().for_each(|(name, value)| {
+        input.extend_from_slice(name.as_bytes());
+        input.push(0);
+        input.extend_from_slice(value.as_bytes());
+        input.push(0);
+    });
+    hmac::sign(&signing_key, &input)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn strip_one_line_ending(value: &[u8]) -> Vec<u8> {
+    if value.ends_with(b"\r\n") {
+        value[..value.len() - 2].to_vec()
+    } else if value.ends_with(b"\n") {
+        value[..value.len() - 1].to_vec()
+    } else {
+        value.to_vec()
+    }
+}
+
+fn contains_line_break(value: &[u8]) -> bool {
+    value.iter().any(|byte| *byte == b'\r' || *byte == b'\n')
 }
 
 #[cfg(test)]
@@ -290,8 +343,8 @@ mod tests {
         let dir = temp_path("config");
         fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("local.toml");
-        fs::write(dir.join("token"), "Bearer secret\n").expect("secret");
-        fs::write(&path, "version = 1\n[[services]]\nid = 'anvil'\nendpoint = 'https://anvil.test/mcp'\ntimeout = '30s'\n[[services.headers]]\nheader = 'Authorization'\nfile = 'token'\n").expect("config");
+        fs::write(dir.join("token"), "Bearer secret\r\n").expect("secret");
+        fs::write(&path, "version = 1\n[[services]]\nid = 'anvil'\nendpoint = 'https://anvil.test/mcp'\ntimeout = '30s'\n[[services.headers]]\nname = 'Authorization'\nvalue_file = 'token'\n").expect("config");
         let source = LocalSource::new(&path);
         let (snapshot, healthy) = source.load(1).expect("load");
         assert!(healthy);
@@ -309,11 +362,11 @@ mod tests {
     #[test]
     fn invalid_credential_does_not_discard_other_services() {
         let path = temp_path("partial");
-        fs::write(&path, "version = 1\n[[services]]\nid = 'good'\nendpoint = 'http://good.test/mcp'\ntimeout = '1s'\n[[services]]\nid = 'bad'\nendpoint = 'http://bad.test/mcp'\ntimeout = '1s'\n[[services.headers]]\nheader = 'Authorization'\nenv = 'LATCHKEY_MISSING_TEST_ENV'\n").expect("config");
+        fs::write(&path, "version = 1\n[[services]]\nid = 'good'\nendpoint = 'http://good.test/mcp'\ntimeout = '1s'\n[[services]]\nid = 'bad'\nendpoint = 'http://bad.test/mcp'\ntimeout = '1s'\n[[services.headers]]\nname = 'Authorization'\nvalue_env = 'LATCHKEY_MISSING_TEST_ENV'\n").expect("config");
         let (snapshot, healthy) = LocalSource::new(&path).load(4).expect("load");
         assert!(!healthy);
-        assert_eq!(snapshot.services.len(), 2);
-        assert!(snapshot.services[1].headers.is_empty());
+        assert_eq!(snapshot.services.len(), 1);
+        assert_eq!(snapshot.services[0].spec.id, ServiceId::new("good"));
         let _ = fs::remove_file(path);
     }
 
@@ -332,5 +385,121 @@ mod tests {
             }],
         };
         assert!(normalize(raw, Path::new("config.toml"), 1).is_err());
+    }
+
+    #[test]
+    fn rejects_userinfo_and_embedded_header_line_breaks() {
+        let path = temp_path("newline");
+        fs::write(&path, "version = 1\n[[services]]\nid = 'anvil'\nendpoint = 'https://user:secret@anvil.test/mcp'\ntimeout = '1s'\n").expect("config");
+        assert!(LocalSource::new(&path).load(1).is_err());
+        fs::write(&path, "version = 1\n[[services]]\nid = 'anvil'\nendpoint = 'https://anvil.test/mcp'\ntimeout = '1s'\n[[services.headers]]\nname = 'Authorization'\nvalue_env = 'LATCHKEY_NEWLINE_TEST'\n").expect("config");
+        unsafe { std::env::set_var("LATCHKEY_NEWLINE_TEST", "Bearer bad\nvalue") };
+        let (snapshot, healthy) = LocalSource::new(&path).load(1).expect("load");
+        assert!(!healthy);
+        assert!(snapshot.services.is_empty());
+        unsafe { std::env::remove_var("LATCHKEY_NEWLINE_TEST") };
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn standalone_loading_ignores_kube_configuration() {
+        let path = temp_path("no-kube");
+        fs::write(
+            &path,
+            "version = 1\n[[services]]\nid = 'anvil'\nendpoint = 'http://anvil.test/mcp'\ntimeout = '1s'\n",
+        )
+        .expect("config");
+        unsafe { std::env::set_var("KUBECONFIG", "/path/that/does/not/exist") };
+        let (snapshot, healthy) = LocalSource::new(&path).load(1).expect("local load");
+        assert!(healthy);
+        assert_eq!(snapshot.services.len(), 1);
+        unsafe { std::env::remove_var("KUBECONFIG") };
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn reload_retains_last_good_and_detects_disable_and_rotation() {
+        let dir = temp_path("reload");
+        fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("local.toml");
+        let credential = dir.join("credential");
+        fs::write(&credential, "Bearer first\n").expect("credential");
+        let config = |enabled: bool| {
+            format!(
+                "version = 1\n[[services]]\nid = 'anvil'\nenabled = {enabled}\nendpoint = 'http://anvil.test/mcp'\ntimeout = '1s'\n[[services.headers]]\nname = 'Authorization'\nvalue_file = 'credential'\n"
+            )
+        };
+        fs::write(&path, config(true)).expect("config");
+        let (snapshot_tx, mut snapshot_rx) = watch::channel(ConfigSnapshot {
+            revision: 0,
+            services: Vec::new(),
+        });
+        let (state_tx, mut state_rx) = watch::channel(SourceState::default());
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn({
+            let cancel = cancel.clone();
+            let source = LocalSource::new(&path);
+            async move { source.run(snapshot_tx, state_tx, cancel).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), snapshot_rx.changed())
+            .await
+            .expect("initial timeout")
+            .expect("initial snapshot");
+        tokio::time::timeout(Duration::from_secs(2), state_rx.changed())
+            .await
+            .expect("initial state timeout")
+            .expect("initial state");
+        assert!(state_rx.borrow().healthy);
+        let first_revision = snapshot_rx.borrow().revision;
+        assert_eq!(
+            snapshot_rx.borrow().services[0]
+                .headers
+                .iter()
+                .next()
+                .unwrap()
+                .1,
+            "Bearer first"
+        );
+
+        fs::write(&path, "version = ").expect("invalid config");
+        tokio::time::timeout(Duration::from_secs(2), state_rx.changed())
+            .await
+            .expect("invalid timeout")
+            .expect("invalid state");
+        assert!(!state_rx.borrow().healthy);
+        assert_eq!(snapshot_rx.borrow().revision, first_revision);
+
+        fs::write(&credential, "Bearer second\n").expect("rotated credential");
+        fs::write(&path, config(false)).expect("disabled config");
+        let (direct, direct_healthy) = LocalSource::new(&path).load(9).expect("updated config");
+        assert!(direct_healthy);
+        assert!(!direct.services[0].spec.enabled);
+        assert!(!task.is_finished(), "source stopped before reload");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                snapshot_rx.changed().await.expect("reload snapshot");
+                if !snapshot_rx.borrow().services[0].spec.enabled {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("reload timeout");
+        assert!(!snapshot_rx.borrow().services[0].spec.enabled);
+        assert_eq!(
+            snapshot_rx.borrow().services[0]
+                .headers
+                .iter()
+                .next()
+                .unwrap()
+                .1,
+            "Bearer second"
+        );
+
+        cancel.cancel();
+        task.await.expect("join").expect("source shutdown");
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(credential);
+        let _ = fs::remove_dir(dir);
     }
 }

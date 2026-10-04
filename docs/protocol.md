@@ -11,4 +11,6 @@ their schemas are generated from the frozen request contracts.
 
 Standalone configuration is TOML (`version = 1`). Service credentials are
 referenced by relative files or startup environment variable names and are
-never stored in the configuration file.
+never stored in the configuration file. Header entries use `name` plus exactly
+one of `value_file` or `value_env`; file references resolve relative to this
+configuration file.

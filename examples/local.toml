@@ -9,4 +9,4 @@ refresh_interval = "5m"
 
 [[services.headers]]
 header = "Authorization"
-file = "credentials/anvil.authorization"
+value_file = "credentials/anvil.authorization"
