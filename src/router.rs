@@ -1,10 +1,15 @@
 //! Exact-snapshot execution routing and bounded admission.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
 
 use crate::contracts::{
     CatalogRead, ExecContext, ExecRequest, GatewayApi, GatewayError, MetricEvent, Operation,
@@ -38,6 +43,28 @@ pub struct Router {
     telemetry: Arc<dyn Telemetry>,
     permits: Arc<Semaphore>,
     limits: ExecLimits,
+    admission: Arc<Admission>,
+}
+
+struct Admission {
+    accepting: AtomicBool,
+    next_id: AtomicU64,
+    children: Mutex<BTreeMap<u64, CancellationToken>>,
+    changed: Notify,
+}
+
+struct ExecutionGuard {
+    admission: Arc<Admission>,
+    id: u64,
+}
+
+impl Drop for ExecutionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut children) = self.admission.children.lock() {
+            children.remove(&self.id);
+        }
+        self.admission.changed.notify_waiters();
+    }
 }
 
 impl Router {
@@ -54,14 +81,85 @@ impl Router {
             telemetry,
             permits: Arc::new(Semaphore::new(capacity)),
             limits,
+            admission: Arc::new(Admission {
+                accepting: AtomicBool::new(true),
+                next_id: AtomicU64::new(1),
+                children: Mutex::new(BTreeMap::new()),
+                changed: Notify::new(),
+            }),
         }
     }
 
     async fn admit(&self) -> Result<OwnedSemaphorePermit, GatewayError> {
+        if !self.admission.accepting.load(Ordering::Acquire) {
+            return Err(GatewayError::Unavailable("gateway shutting down".into()));
+        }
         self.permits
             .clone()
             .try_acquire_owned()
             .map_err(|_| GatewayError::Overloaded)
+    }
+
+    fn register(&self, cancellation: CancellationToken) -> Result<ExecutionGuard, GatewayError> {
+        if !self.admission.accepting.load(Ordering::Acquire) {
+            return Err(GatewayError::Unavailable("gateway shutting down".into()));
+        }
+        let id = self.admission.next_id.fetch_add(1, Ordering::Relaxed);
+        let mut children = self
+            .admission
+            .children
+            .lock()
+            .map_err(|_| GatewayError::Unavailable("gateway admission unavailable".into()))?;
+        if !self.admission.accepting.load(Ordering::Acquire) {
+            return Err(GatewayError::Unavailable("gateway shutting down".into()));
+        }
+        children.insert(id, cancellation);
+        Ok(ExecutionGuard {
+            admission: Arc::clone(&self.admission),
+            id,
+        })
+    }
+
+    /// Stop accepting new executions, drain existing executions, and then
+    /// cancel children that did not finish within `grace`.
+    pub async fn shutdown(&self, grace: Duration) {
+        self.admission.accepting.store(false, Ordering::Release);
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            let empty = self
+                .admission
+                .children
+                .lock()
+                .map(|children| children.is_empty())
+                .unwrap_or(true);
+            if empty {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::select! {
+                _ = self.admission.changed.notified() => {}
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        }
+        if let Ok(children) = self.admission.children.lock() {
+            for child in children.values() {
+                child.cancel();
+            }
+        }
+    }
+
+    pub fn is_accepting(&self) -> bool {
+        self.admission.accepting.load(Ordering::Acquire)
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.admission
+            .children
+            .lock()
+            .map(|children| children.len())
+            .unwrap_or(0)
     }
 }
 
@@ -92,7 +190,7 @@ impl GatewayApi for Router {
                 } else {
                     0
                 };
-                (score > 0).then(|| (score, entry))
+                (score > 0).then_some((score, entry))
             })
             .collect();
         hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
@@ -141,6 +239,9 @@ impl GatewayApi for Router {
                 Err(GatewayError::Timeout)
             };
         }
+        let child_cancellation = context.cancellation.child_token();
+        let guard = self.register(child_cancellation.clone())?;
+        context.cancellation = child_cancellation;
         let service_deadline = std::time::Instant::now()
             .checked_add(route.service.spec.timeout.min(self.limits.default_timeout))
             .unwrap_or(context.deadline);
@@ -160,6 +261,7 @@ impl GatewayApi for Router {
                 context,
             )
             .await;
+        drop(guard);
         drop(permit);
         result
     }

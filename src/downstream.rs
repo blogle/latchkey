@@ -4,8 +4,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use opentelemetry::trace::TraceContextExt;
 use reqwest::header::{HeaderName, HeaderValue};
-use rmcp::model::{CallToolRequestParams, ClientInfo, Implementation, Tool};
+use rmcp::model::{
+    CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation, RequestParamsMeta, Tool,
+};
 use rmcp::service::ServiceExt;
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
@@ -24,7 +27,6 @@ const RESERVED_HEADERS: &[&str] = &[
     "mcp-protocol-version",
     "mcp-session-id",
     "last-event-id",
-    "authorization",
 ];
 
 /// The concrete downstream client. It is intentionally stateless: each call
@@ -64,12 +66,23 @@ impl SdkDownstream {
     }
 
     fn client_info() -> ClientInfo {
-        ClientInfo {
-            protocol_version: Default::default(),
-            capabilities: Default::default(),
-            client_info: Implementation::new("latchkey", env!("CARGO_PKG_VERSION")),
-            ..Default::default()
-        }
+        ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new("latchkey", env!("CARGO_PKG_VERSION")),
+        )
+    }
+
+    fn traceparent(context: &ExecContext) -> Option<String> {
+        let span = context.trace.span();
+        let span_context = span.span_context();
+        span_context.is_valid().then(|| {
+            format!(
+                "00-{}-{}-{:02x}",
+                span_context.trace_id(),
+                span_context.span_id(),
+                span_context.trace_flags().to_u8()
+            )
+        })
     }
 
     async fn with_deadline<T, F>(context: &ExecContext, future: F) -> Result<T, GatewayError>
@@ -155,12 +168,10 @@ impl DownstreamIo for SdkDownstream {
             operation: Operation::Discover,
             service: Some(service.spec.id.clone()),
         });
-        let result = self
-            .run_client(service.clone(), &context, |peer| {
-                Box::pin(async move { peer.list_all_tools().await })
-            })
-            .await;
-        result
+        self.run_client(service.clone(), &context, |peer| {
+            Box::pin(async move { peer.list_all_tools().await })
+        })
+        .await
     }
 
     async fn call(
@@ -177,12 +188,15 @@ impl DownstreamIo for SdkDownstream {
             operation: Operation::DownstreamCall,
             service: Some(service.spec.id.clone()),
         });
+        let traceparent = Self::traceparent(&context);
         self.run_client(service, &context, move |peer| {
             Box::pin(async move {
-                peer.call_tool_once(
-                    CallToolRequestParams::new(original_name).with_arguments(arguments),
-                )
-                .await
+                let mut params =
+                    CallToolRequestParams::new(original_name).with_arguments(arguments);
+                if let Some(traceparent) = traceparent {
+                    params.set_traceparent(&traceparent);
+                }
+                peer.call_tool_once(params).await
             })
         })
         .await
