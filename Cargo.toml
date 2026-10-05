@@ -93,7 +93,7 @@ tracing-opentelemetry = "=0.34.0"
 # for configuration files.
 url = "=2.5.8"
 humantime = "=2.4.0"
-toml = "=0.9.8"
+toml = "=0.9.12"
 ring = "=0.17.14"
 
 # TLS: pinned directly so the crypto provider is an explicit frozen decision
