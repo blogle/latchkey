@@ -337,6 +337,80 @@ async fn structured_results_downstream_errors_and_deadlines_survive_the_adapter(
     }
     drop(client);
     task.abort();
+
+    let (uri, task) = start_server(
+        FakeGateway {
+            error: Some(GatewayError::UnknownTool(
+                "anvil__missing_operation".to_owned(),
+            )),
+            ..Default::default()
+        },
+        AuthConfig::unauthenticated(),
+        vec!["127.0.0.1".to_owned()],
+    )
+    .await;
+    let client = client_for(&uri, ProtocolVersion::V_2025_11_25, None).await;
+    let error = client
+        .call_tool(
+            CallToolRequestParams::new("exec").with_arguments(
+                json!({"name": "anvil__missing_operation"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect_err("unknown downstream tool");
+    match error {
+        ServiceError::McpError(error) => {
+            assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+            assert_eq!(error.message, "unknown downstream tool");
+            assert_eq!(
+                error.data.expect("reason data")["category"],
+                "unknown-downstream-tool"
+            );
+        }
+        other => panic!("unexpected client error: {other:?}"),
+    }
+    drop(client);
+    task.abort();
+
+    let (uri, task) = start_server(
+        FakeGateway {
+            error: Some(GatewayError::UnsupportedCapability(
+                "downstream streaming".to_owned(),
+            )),
+            ..Default::default()
+        },
+        AuthConfig::unauthenticated(),
+        vec!["127.0.0.1".to_owned()],
+    )
+    .await;
+    let client = client_for(&uri, ProtocolVersion::V_2025_11_25, None).await;
+    let error = client
+        .call_tool(
+            CallToolRequestParams::new("exec").with_arguments(
+                json!({"name": "anvil__session_create"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect_err("unsupported downstream capability");
+    match error {
+        ServiceError::McpError(error) => {
+            assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+            assert_eq!(error.message, "unsupported downstream capability");
+            assert_eq!(
+                error.data.expect("reason data")["category"],
+                "unsupported-downstream-capability"
+            );
+        }
+        other => panic!("unexpected client error: {other:?}"),
+    }
+    drop(client);
+    task.abort();
 }
 
 #[tokio::test]

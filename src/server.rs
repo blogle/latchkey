@@ -242,9 +242,9 @@ fn to_mcp_error(error: GatewayError) -> rmcp::ErrorData {
             "invalid gateway input",
         ),
         GatewayError::UnknownTool(_) => stable_error(
-            rmcp::model::ErrorCode::METHOD_NOT_FOUND,
-            "unknown-tool",
-            "unknown gateway tool",
+            rmcp::model::ErrorCode::INVALID_PARAMS,
+            "unknown-downstream-tool",
+            "unknown downstream tool",
         ),
         GatewayError::Timeout => stable_error(
             rmcp::model::ErrorCode::INTERNAL_ERROR,
@@ -267,9 +267,9 @@ fn to_mcp_error(error: GatewayError) -> rmcp::ErrorData {
             "gateway request unavailable",
         ),
         GatewayError::UnsupportedCapability(_) => stable_error(
-            rmcp::model::ErrorCode::METHOD_NOT_FOUND,
-            "unsupported-capability",
-            "gateway capability unavailable",
+            rmcp::model::ErrorCode::INTERNAL_ERROR,
+            "unsupported-downstream-capability",
+            "unsupported downstream capability",
         ),
     }
 }
