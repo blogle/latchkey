@@ -11,7 +11,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::CatalogStore;
-use crate::contracts::{ConfigSnapshot, GatewayApi, GatewayError, NoopTelemetry, StatusSink,
+use crate::contracts::{ConfigSnapshot, ConfigSource, GatewayApi, GatewayError, NoopTelemetry, StatusSink,
     ServiceId, Revision, ServiceStatus};
 use crate::downstream::SdkDownstream;
 use crate::health::HealthState;
@@ -57,27 +57,29 @@ impl Runtime {
         let cancel = CancellationToken::new();
         let (snapshot_tx, snapshot_rx) = watch::channel(ConfigSnapshot { revision: 0, services: Vec::new() });
         let (state_tx, mut state_rx) = watch::channel(crate::contracts::SourceState::default());
-        let reconcile_cancel = cancel.clone();
-        let reconcile_task = tokio::spawn(reconciler.run_source(source, snapshot_tx, state_tx, reconcile_cancel));
+        let source_cancel = cancel.clone();
+        let source_task = tokio::spawn(source.run(snapshot_tx, state_tx, source_cancel));
+        let mut snapshot_rx = snapshot_rx;
+        let mut state_rx = state_rx;
+        snapshot_rx.changed().await.map_err(|_| "local source stopped before its first snapshot")?;
+        state_rx.changed().await.map_err(|_| "local source stopped before its first state")?;
+        let initial_state = *state_rx.borrow();
+        let initial_snapshot = snapshot_rx.borrow_and_update().clone();
+        reconciler.reconcile(initial_snapshot).await;
+        let reconcile_task = tokio::spawn(reconciler.run(snapshot_rx, cancel.clone()));
         let health = HealthState::new();
         health.set_initialized(true);
+        health.set_source_healthy(initial_state.healthy);
+        health.set_reconciled(true);
         health.set_accepting(true);
         let health_watch = health.clone();
-        let reconciler_watch = reconciler.clone();
         tokio::spawn(async move {
             loop {
                 let state = *state_rx.borrow();
                 health_watch.set_source_healthy(state.healthy);
-                health_watch.set_reconciled(state.initial_complete && reconciler_watch.initial_reconcile_complete());
-                if state.initial_complete && reconciler_watch.initial_reconcile_complete() { break; }
-                tokio::select! {
-                    changed = state_rx.changed() => if changed.is_err() { break; },
-                    _ = tokio::time::sleep(Duration::from_millis(10)) => {},
-                }
+                if state_rx.changed().await.is_err() { break; }
             }
         });
-        // Keep the receiver alive: Reconciler owns its subscribed receiver.
-        let _ = snapshot_rx;
         let facade: Arc<dyn GatewayApi> = Arc::new(GatewayFacade { search, exec: router.clone() });
         let app = Router::new()
             .merge(McpServer::new(facade, AuthConfig::unauthenticated(), Vec::new()).router())
@@ -94,6 +96,7 @@ impl Runtime {
         };
         axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
         health.stop();
+        let _ = source_task.await;
         let _ = reconcile_task.await;
         Ok(())
     }
