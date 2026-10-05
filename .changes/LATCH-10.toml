@@ -1,0 +1,3 @@
+category = "Added"
+summary = "Add deterministic local catalog search with schema-preserving results"
+bump = "patch"

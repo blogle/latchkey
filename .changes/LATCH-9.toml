@@ -1,0 +1,3 @@
+category = "Added"
+summary = "Publish validated downstream catalog snapshots atomically"
+bump = "patch"
