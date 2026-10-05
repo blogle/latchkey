@@ -1,0 +1,3 @@
+category = "Added"
+summary = "Add standalone runtime composition, health endpoints, and bounded shutdown"
+bump = "patch"

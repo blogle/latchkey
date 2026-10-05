@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::{Semaphore, watch};
@@ -26,6 +27,7 @@ pub struct Reconciler {
     current: Mutex<HashMap<ServiceId, crate::catalog::RevisionFence>>,
     config_revision: Mutex<u64>,
     desired: Mutex<Option<ConfigSnapshot>>,
+    initial_reconcile_complete: AtomicBool,
 }
 
 impl Reconciler {
@@ -45,6 +47,7 @@ impl Reconciler {
             current: Mutex::new(HashMap::new()),
             config_revision: Mutex::new(0),
             desired: Mutex::new(None),
+            initial_reconcile_complete: AtomicBool::new(false),
         })
     }
 
@@ -168,6 +171,11 @@ impl Reconciler {
                 }
             }
         }
+        self.initial_reconcile_complete.store(true, Ordering::Release);
+    }
+
+    pub fn initial_reconcile_complete(&self) -> bool {
+        self.initial_reconcile_complete.load(Ordering::Acquire)
     }
 
     /// Consume source snapshots until cancellation. A failed service does not
