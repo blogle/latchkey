@@ -1,0 +1,12 @@
+# Standalone Latchkey configuration. Credential material stays outside this file.
+version = 1
+
+[[services]]
+id = "anvil"
+endpoint = "https://anvil.example.invalid/mcp"
+timeout = "180s"
+refresh_interval = "5m"
+
+[[services.headers]]
+header = "Authorization"
+value_file = "credentials/anvil.authorization"
