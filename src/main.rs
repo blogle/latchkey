@@ -42,7 +42,9 @@ async fn serve_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + S
             _ => return Err(format!("unknown serve option `{value}`").into()),
         };
         index += 1;
-        let argument = args.get(index).ok_or_else(|| format!("missing value for `{value}`"))?;
+        let argument = args
+            .get(index)
+            .ok_or_else(|| format!("missing value for `{value}`"))?;
         *target = Some(argument.clone());
         index += 1;
     }
@@ -50,6 +52,8 @@ async fn serve_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + S
         return Err("serve requires --mode standalone".into());
     }
     let config = PathBuf::from(config.ok_or("serve requires --config PATH")?);
-    let listen = listen.map(|value| value.parse::<SocketAddr>()).transpose()?;
+    let listen = listen
+        .map(|value| value.parse::<SocketAddr>())
+        .transpose()?;
     latchkey::runtime::Runtime::standalone(config, listen).await
 }
