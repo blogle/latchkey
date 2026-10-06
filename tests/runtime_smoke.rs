@@ -45,10 +45,10 @@ async fn wait_http(address: &str, path: &str, expected: reqwest::StatusCode) {
         if tokio::time::Instant::now() >= deadline {
             panic!("{path} did not reach {expected}");
         }
-        if let Ok(response) = client.get(format!("http://{address}{path}")).send().await {
-            if response.status() == expected {
-                return;
-            }
+        if let Ok(response) = client.get(format!("http://{address}{path}")).send().await
+            && response.status() == expected
+        {
+            return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
