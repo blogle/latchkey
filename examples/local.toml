@@ -8,5 +8,5 @@ timeout = "180s"
 refresh_interval = "5m"
 
 [[services.headers]]
-header = "Authorization"
+name = "Authorization"
 value_file = "credentials/anvil.authorization"
