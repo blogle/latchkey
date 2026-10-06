@@ -71,6 +71,6 @@ jobs:
             echo "${digest_ref}"
             echo '```'
             echo
-            echo "Source commit: \\`${GITHUB_SHA}\\`"
-            echo "Immutable tag: \\`${IMAGE}\\`"
+            echo "Source commit: \`${GITHUB_SHA}\`"
+            echo "Immutable tag: \`${IMAGE}\`"
           } >> "$GITHUB_STEP_SUMMARY"
