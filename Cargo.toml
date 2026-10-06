@@ -43,7 +43,7 @@ rmcp = { version = "=3.0.1", default-features = false, features = [
 
 # Async runtime and utilities: watch channels (config snapshots), task
 # tracking/JoinMap (reconciler), cancellation tokens (portable cancellation).
-tokio = { version = "=1.53.1", features = [
+tokio = { version = "=1.53.2", features = [
     "macros",
     "rt-multi-thread",
     "sync",
