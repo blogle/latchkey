@@ -108,7 +108,6 @@ impl Runtime {
         let initial_state = *state_rx.borrow();
         let initial_snapshot = snapshot_rx.borrow_and_update().clone();
         reconciler.reconcile(initial_snapshot).await;
-        let reconcile_task = tokio::spawn(reconciler.run(snapshot_rx, cancel.clone()));
         let health = HealthState::new();
         health.set_initialized(true);
         health.set_source_healthy(initial_state.healthy);
@@ -141,12 +140,12 @@ impl Runtime {
             shutdown_router.shutdown(SHUTDOWN_GRACE).await;
             shutdown_cancel.cancel();
         };
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown)
-            .await?;
+        let server = axum::serve(listener, app).with_graceful_shutdown(shutdown);
+        let (server_result, _reconcile_result) =
+            tokio::join!(server, reconciler.run(snapshot_rx, cancel.clone()));
+        server_result?;
         health.stop();
         let _ = source_task.await;
-        let _ = reconcile_task.await;
         Ok(())
     }
 }
