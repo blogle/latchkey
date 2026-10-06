@@ -64,6 +64,7 @@ jobs:
             || { echo "unexpected published digest: $digest_ref" >&2; exit 1; }
           digest="${digest_ref##*@}"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Published digest: ${digest_ref}"
           {
             echo "### Latchkey PoC image"
             echo
