@@ -30,13 +30,20 @@ async fn main() -> ExitCode {
 }
 
 async fn serve_args(args: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (config, listen, allowed_hosts) = parse_serve_args(args)?;
-    latchkey::runtime::Runtime::standalone(config, listen, allowed_hosts).await
+    let options = parse_serve_args(args)?;
+    latchkey::runtime::Runtime::standalone(options.config, options.listen, options.allowed_hosts)
+        .await
+}
+
+struct ServeOptions {
+    config: PathBuf,
+    listen: Option<SocketAddr>,
+    allowed_hosts: Vec<String>,
 }
 
 fn parse_serve_args(
     args: &[String],
-) -> Result<(PathBuf, Option<SocketAddr>, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<ServeOptions, Box<dyn std::error::Error + Send + Sync>> {
     let mut mode = None;
     let mut config = None;
     let mut listen = None;
@@ -79,7 +86,11 @@ fn parse_serve_args(
     let listen = listen
         .map(|value| value.parse::<SocketAddr>())
         .transpose()?;
-    Ok((config, listen, allowed_hosts))
+    Ok(ServeOptions {
+        config,
+        listen,
+        allowed_hosts,
+    })
 }
 
 #[cfg(test)]
@@ -88,14 +99,7 @@ mod tests {
 
     fn parse(
         args: &[&str],
-    ) -> Result<
-        (
-            std::path::PathBuf,
-            Option<std::net::SocketAddr>,
-            Vec<String>,
-        ),
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
+    ) -> Result<super::ServeOptions, Box<dyn std::error::Error + Send + Sync>> {
         parse_serve_args(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
     }
 
@@ -115,7 +119,7 @@ mod tests {
         ])
         .expect("valid serve arguments");
         assert_eq!(
-            parsed.2,
+            parsed.allowed_hosts,
             ["latchkey.nexus.svc.cluster.local", "latchkey.example.test"]
         );
     }
