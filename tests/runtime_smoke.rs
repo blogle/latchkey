@@ -107,7 +107,7 @@ async fn real_process_search_exec_isolated_from_unavailable_service() {
     );
     wait_http(&gateway_address, "/readyz", reqwest::StatusCode::OK).await;
 
-    let service = client(&gateway_address).await;
+    let mut service = client(&gateway_address).await;
     let mut search_args = BTreeMap::new();
     search_args.insert(
         "query".to_owned(),
