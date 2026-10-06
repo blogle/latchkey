@@ -11,6 +11,7 @@ use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
 use serde_json::Value;
+use tokio::net::TcpStream;
 
 struct Reaped(Child);
 impl Drop for Reaped {
@@ -54,6 +55,24 @@ async fn wait_http(address: &str, path: &str, expected: reqwest::StatusCode) {
     }
 }
 
+async fn wait_tcp(address: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            panic!("fixture at {address} did not accept TCP connections");
+        }
+        let remaining = deadline - now;
+        if tokio::time::timeout(remaining, TcpStream::connect(address))
+            .await
+            .is_ok_and(|result| result.is_ok())
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn client(
     address: &str,
 ) -> rmcp::service::RunningService<rmcp::service::RoleClient, ClientInfo> {
@@ -77,12 +96,7 @@ async fn real_process_search_exec_isolated_from_unavailable_service() {
     latchkey::runtime::install_crypto_provider();
     let fixture_address = free_address();
     let _fixture = start_fixture(&fixture_address);
-    wait_http(
-        &fixture_address,
-        "/mcp",
-        reqwest::StatusCode::METHOD_NOT_ALLOWED,
-    )
-    .await;
+    wait_tcp(&fixture_address).await;
 
     let gateway_address = free_address();
     let config = std::env::temp_dir().join(format!("latchkey-runtime-{}.toml", std::process::id()));
