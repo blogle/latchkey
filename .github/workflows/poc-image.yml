@@ -1,0 +1,76 @@
+name: Publish PoC OCI image
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: poc-image-master
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish-git-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact master commit
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/master ]] || exit 1
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - uses: DeterminateSystems/nix-installer-action@v23
+        with:
+          extra-conf: |
+            substituters = https://cache.nixos.org/ https://nix-community.cachix.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
+
+      - uses: Mic92/hestia@v3
+
+      - name: Build exact OCI artifact
+        run: nix build .#oci --out-link result-oci
+
+      - name: Authenticate to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Load and publish immutable commit tag
+        id: publish
+        env:
+          IMAGE: ghcr.io/blogle/latchkey:git-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          loaded="$(docker load --input result-oci)"
+          source_image="$(printf '%s\n' "$loaded" | sed -n 's/^Loaded image: //p' | tail -n1)"
+          [[ -n "$source_image" ]] || { echo "docker load did not report an image" >&2; exit 1; }
+          docker tag "$source_image" "$IMAGE"
+          docker push "$IMAGE" | tee "$RUNNER_TEMP/docker-push.log"
+          digest_ref="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE")"
+          [[ "$digest_ref" =~ ^ghcr\.io/blogle/latchkey@sha256:[0-9a-f]{64}$ ]] \
+            || { echo "unexpected published digest: $digest_ref" >&2; exit 1; }
+          digest="${digest_ref##*@}"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Latchkey PoC image"
+            echo
+            echo '```text'
+            echo "${digest_ref}"
+            echo '```'
+            echo
+            echo "Source commit: \\`${GITHUB_SHA}\\`"
+            echo "Immutable tag: \\`${IMAGE}\\`"
+          } >> "$GITHUB_STEP_SUMMARY"
