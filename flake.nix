@@ -124,6 +124,8 @@
       oci = pkgs.dockerTools.buildLayeredImage {
         name = "latchkey";
         tag = packageMeta.package.version;
+        created = "1970-01-01T00:00:00Z";
+        architecture = "amd64";
         contents = [
           musl-package
           pkgs.cacert
@@ -131,6 +133,15 @@
         config = {
           User = "65532:65532";
           Entrypoint = [ "/bin/latchkey" ];
+          Cmd = [
+            "serve"
+            "--mode"
+            "standalone"
+            "--config"
+            "/etc/latchkey/config.toml"
+            "--listen"
+            "0.0.0.0:8080"
+          ];
         };
       };
 

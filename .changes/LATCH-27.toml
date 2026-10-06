@@ -1,0 +1,3 @@
+category = "Added"
+summary = "Add reproducible nonroot amd64 OCI image contract and deployment packaging guidance"
+bump = "patch"
