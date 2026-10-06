@@ -59,6 +59,7 @@ impl ServerHandler for Handler {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    latchkey::runtime::install_crypto_provider();
     let address: SocketAddr = std::env::args().nth(1).expect("listen address").parse()?;
     let service = StreamableHttpService::new(
         || Ok(Handler),

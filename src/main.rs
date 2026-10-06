@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    latchkey::runtime::install_crypto_provider();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "serve") {
         return match serve_args(&args[1..]).await {
