@@ -73,6 +73,7 @@ impl Runtime {
     pub async fn standalone(
         config: PathBuf,
         listen: Option<SocketAddr>,
+        allowed_hosts: Vec<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         install_crypto_provider();
         let telemetry = Arc::new(NoopTelemetry);
@@ -132,7 +133,7 @@ impl Runtime {
             exec: router.clone(),
         });
         let app = Router::new()
-            .merge(McpServer::new(facade, AuthConfig::unauthenticated(), Vec::new()).router())
+            .merge(McpServer::new(facade, AuthConfig::unauthenticated(), allowed_hosts).router())
             .merge(health.router());
         let listener = tokio::net::TcpListener::bind(listen.unwrap_or(DEFAULT_LISTEN)).await?;
         let shutdown_health = health.clone();

@@ -211,6 +211,56 @@ async fn bearer_and_allowed_host_controls_are_enforced() {
     task.abort();
 }
 
+async fn get_with_host(uri: &str, host: &str) -> reqwest::StatusCode {
+    reqwest::Client::new()
+        .get(uri)
+        .header(HOST, host)
+        .send()
+        .await
+        .expect("host request")
+        .status()
+}
+
+#[tokio::test]
+async fn default_and_explicit_host_allowlists_are_enforced() {
+    install_crypto_provider();
+
+    let (uri, task) = start_server(
+        FakeGateway::default(),
+        AuthConfig::unauthenticated(),
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        get_with_host(&uri, "localhost").await,
+        reqwest::StatusCode::METHOD_NOT_ALLOWED
+    );
+    assert_eq!(
+        get_with_host(&uri, "unlisted.example").await,
+        reqwest::StatusCode::FORBIDDEN
+    );
+    task.abort();
+
+    let (uri, task) = start_server(
+        FakeGateway::default(),
+        AuthConfig::unauthenticated(),
+        vec!["cluster.example".to_owned(), "ingress.example".to_owned()],
+    )
+    .await;
+    for host in ["cluster.example", "ingress.example"] {
+        assert_eq!(
+            get_with_host(&uri, host).await,
+            reqwest::StatusCode::METHOD_NOT_ALLOWED,
+            "explicit host {host} should be allowed"
+        );
+    }
+    assert_eq!(
+        get_with_host(&uri, "unlisted.example").await,
+        reqwest::StatusCode::FORBIDDEN
+    );
+    task.abort();
+}
+
 #[tokio::test]
 async fn structured_results_downstream_errors_and_deadlines_survive_the_adapter() {
     install_crypto_provider();

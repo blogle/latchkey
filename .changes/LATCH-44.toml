@@ -1,0 +1,3 @@
+category = "Fixed"
+summary = "Allow standalone MCP hostnames through an explicit repeatable CLI allowlist"
+bump = "patch"
