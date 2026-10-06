@@ -74,6 +74,7 @@ async fn client(
 
 #[tokio::test]
 async fn real_process_search_exec_isolated_from_unavailable_service() {
+    latchkey::runtime::install_crypto_provider();
     let fixture_address = free_address();
     let _fixture = start_fixture(&fixture_address);
     wait_http(

@@ -27,6 +27,11 @@ const DEFAULT_LISTEN: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
+/// Install the pinned rustls provider once; repeated calls are harmless.
+pub fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 struct LocalStatus;
 #[async_trait]
 impl StatusSink for LocalStatus {
@@ -69,7 +74,7 @@ impl Runtime {
         config: PathBuf,
         listen: Option<SocketAddr>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        install_crypto_provider();
         let telemetry = Arc::new(NoopTelemetry);
         let catalog = CatalogStore::new();
         let http = reqwest::Client::new();
