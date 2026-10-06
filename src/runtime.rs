@@ -94,7 +94,10 @@ impl Runtime {
         });
         let (state_tx, state_rx) = watch::channel(crate::contracts::SourceState::default());
         let source_cancel = cancel.clone();
-        let source_task = tokio::spawn(source.run(snapshot_tx, state_tx, source_cancel));
+        let source_task = tokio::spawn({
+            let source = Arc::clone(&source);
+            async move { source.run(snapshot_tx, state_tx, source_cancel).await }
+        });
         let mut snapshot_rx = snapshot_rx;
         let mut state_rx = state_rx;
         snapshot_rx
