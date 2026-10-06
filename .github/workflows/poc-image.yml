@@ -40,6 +40,25 @@ jobs:
 
       - uses: Mic92/hestia@v3
 
+      - name: Materialize trusted dev environment
+        env:
+          LK_ROOT: ${{ github.workspace }}
+        run: scripts/dev/setup.sh
+
+      - name: Verify trusted dev environment
+        env:
+          LK_ROOT: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          source .dev/env
+          "$LATCHKEY_JUST" --justfile "$GITHUB_WORKSPACE/justfile" --working-directory "$GITHUB_WORKSPACE" doctor
+
+      - name: Run standalone search-exec smoke
+        run: |
+          set -euo pipefail
+          source .dev/env
+          "$LATCHKEY_CARGO" test --locked --test runtime_smoke -- --nocapture
+
       - name: Build exact OCI artifact
         run: nix build .#oci --out-link result-oci
 
