@@ -62,11 +62,7 @@ impl GatewayApi for GatewayFacade {
     }
 }
 
-pub struct Runtime {
-    router: Arc<ExecRouter>,
-    cancel: CancellationToken,
-    health: HealthState,
-}
+pub struct Runtime;
 
 impl Runtime {
     pub async fn standalone(
